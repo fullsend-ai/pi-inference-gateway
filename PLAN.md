@@ -49,7 +49,7 @@ gateways or per-model overrides:
     "gateway": {
       "baseUrl": "https://gw.example.com",
       "apiKeyEnv": "GW_KEY",            // or "tokenFile": "~/.config/gw/token"; never a literal key in examples
-      "authHeader": "authorization",    // or "x-api-key"; default: authorization Bearer for all APIs
+      "authHeader": "authorization",    // superseded: per-API native default, see "Live gateway findings"
       "defaultApi": "openai-responses",
       "headers": { "x-team": "fullsend" },
       "modelsPath": "/v1/models",
@@ -63,6 +63,9 @@ gateways or per-model overrides:
 No `!command` keys, no shell-out (sibling rule). No literal secrets in docs/tests.
 
 ## Per-model API selection (first match wins)
+
+> Superseded in part by "Live gateway findings (2026-10-09)" below (ambiguous owners, catalog
+> mapping, `claude-` rule, config-added models).
 
 1. Config `models[id].api`.
 2. Gateway hint on the model object: `api`, `endpoint`/`inference_endpoint`, or
@@ -107,12 +110,75 @@ cap list at 1000 models, response body ≤ 1 MiB, 10 s timeout, `redirect: "erro
 - `auth.apiKey` = `ApiKeyAuth { name, resolve({ctx, credential, signal}) → AuthResult | undefined,
   check? }`; no `login` ⇒ ambient-only. A spike with an ill-typed auth was silently skipped — type
   it properly, never `as any`.
-- pi's Anthropic transport sends `x-api-key`; a Bearer-only gateway would 401 Claude while GPT
+- (Superseded by "Live gateway findings": native header per API, swap only on override.)
+  pi's Anthropic transport sends `x-api-key`; a Bearer-only gateway would 401 Claude while GPT
   works. Inject a `fetch`/header transform for `anthropic-messages` models that moves the token to
   `authorization: Bearer` when `authHeader` is `authorization` (pattern: sibling
   `createVertexFetch`). Unit-test it explicitly.
 - `vendor/model` ids from the gateway are sent back **verbatim**; only the pi-catalog lookup strips
   the prefix.
+
+## Live gateway findings (2026-10-09)
+
+A probe of a real deployment — a path-routing front proxy — changed five design points. What it
+showed: `GET /v1/models` returns the OpenAI shape with `owned_by: "vertex"` on every model and no
+other metadata (Claude and Gemini ids). The proxy picks the backend from the request path:
+`/v1/messages` serves Claude and accepts **only** `x-api-key` (Bearer is a 401); `/v1/responses`
+serves GPT / o-series ids that are **not listed**; `/v1/chat/completions` serves Gemini (tool calls
+carry `message.extra_content.google.thought_signature`); Claude is a 404 on the other two paths. A
+vendor-prefixed open-weight id (`vendor/org/glm-5-3` style) works on all three paths but is unlisted.
+
+1. **Auth header: native per API.** `anthropic-messages` sends `x-api-key`, the OpenAI transports
+   `authorization: Bearer`, discovery Bearer. `authHeader` is now an optional override — one header
+   name for every target, or an object keyed by `anthropic-messages` / `openai-responses` /
+   `openai-completions` / `discovery` — and `INFERENCE_GATEWAY_AUTH_HEADER` (`x-api-key`, or
+   `anthropic-messages=authorization,discovery=x-api-key`). A transport is wrapped with the header
+   rewrite only when its header is overridden. (Was: Bearer for all, swap on Messages.)
+2. **Ambiguous owners are no signal**: `vertex`, `vertex_ai`, `bedrock`, `bedrock_converse`,
+   `azure_ai`, `openrouter`, `system`, `library`, empty. `azure` (Azure OpenAI) still means
+   responses.
+3. **Catalog mapping**: a pi built-in hit under `anthropic` → messages, under `openai` → responses,
+   under **any other provider** → chat completions (never a native API such as
+   google-generative-ai). Lookups try the id, the id without its `vendor/` prefix, and both with
+   `-`↔`.` swapped between digits (`glm-5-3` ↔ `glm-5.3`). Requests always send the gateway's id.
+4. **`claude-` id fallback** → messages (also after a `vendor/` prefix). Implementation note: it runs
+   *between* the anthropic/openai catalog step and the other-provider step, not after the whole
+   catalog step. pi's aggregator catalogs (`github-copilot`, `opencode`, `openrouter`,
+   `vercel-ai-gateway`, ...) list Claude ids too, so a Claude id missing from pi's `anthropic`
+   catalog would otherwise go to chat completions — a 404 on this proxy. A unit test pins it.
+5. **Config-added models**: a config `models[id]` entry with an `api` adds a model the gateway does
+   not list (metadata: the entry, then pi's catalog, then defaults), regardless of include/exclude;
+   without an `api` it only overrides a listed model. Env form:
+   `INFERENCE_GATEWAY_EXTRA_MODELS=gpt-6-luna=openai-responses,vendor/org/glm-5-3=openai-completions`.
+   Config-added models are also offered when discovery fails.
+
+Resulting selection order: config `api` → gateway `api`/endpoint hints → non-ambiguous owner →
+pi catalog under `anthropic`/`openai` → `claude-` id → pi catalog under any other provider (chat
+completions) → `defaultApi`.
+
+Open phase-5 risks recorded from the probe (no workaround yet): pi's openai-completions transport
+neither reads nor replays Gemini's `extra_content.google.thought_signature` (no occurrence in pi-ai
+0.99.2 or 1.1.0), so multi-turn Gemini tool calls through `/v1/chat/completions` may be rejected.
+
+## Implementation notes (phases 1–4)
+
+Decisions made while implementing, beyond the text above:
+
+- **compat** and **thinkingLevelMap** are copied from a pi catalog entry only when it uses the same
+  transport as the selected one, and `allowedFallbackModels` is never copied: pi turns it into a
+  `fallbacks` body field that non-Anthropic Claude hosts reject with a 400 (seen in the
+  pi-anthropic-vertex sibling).
+- **Stale snapshot**: createProvider restores pi's persisted snapshot over the static `models` on
+  every refresh, including offline ones. After a *successful* load-time discovery the provider
+  withholds that snapshot, so models the gateway dropped do not reappear; after a failed one it is
+  restored as the fallback.
+- **Discovery timeouts**: 5 s inside the extension factory (pi awaits it before every `-p` run),
+  10 s for interactive refreshes. A `/gateway-refresh` command forces a network refresh.
+- **fallbackModels** use the same entry shapes as the gateway list (`"id"` or `{ id, owned_by, ... }`).
+- **Config/env merge**: a file provider with the env provider's id is merged; the env supplies the
+  base URL, credentials and default API, and auth-header overrides and models merge per key.
+- **Metadata cost**: per sub-field (`input`, `output`, `cacheRead`, `cacheWrite`); catalog pricing
+  tiers are kept only when no rate came from the config or the gateway.
 
 ## pi integration
 
