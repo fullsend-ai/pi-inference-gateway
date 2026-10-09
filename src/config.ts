@@ -126,6 +126,31 @@ export function hasControlChars(value: string): boolean {
   return CONTROL_RE.test(value);
 }
 
+export const MAX_MODEL_ID_LENGTH = 256;
+
+/**
+ * The one rule for a model id from any source (gateway list, config file, environment): 1–256
+ * characters, no whitespace, no control characters. Ids are sent back to the gateway verbatim.
+ */
+export function isValidModelId(id: string | undefined): boolean {
+  return (
+    typeof id === "string" &&
+    id.length > 0 &&
+    id.length <= MAX_MODEL_ID_LENGTH &&
+    !/\s/.test(id) &&
+    !hasControlChars(id)
+  );
+}
+
+/**
+ * The config override for a model id — an *own* property only. Config dicts are plain objects
+ * built with Object.fromEntries (so a `__proto__` key stays an ordinary key), and a lookup must not
+ * pick up `constructor` or `toString` from Object.prototype.
+ */
+export function modelOverride(config: Pick<GatewayConfig, "models">, id: string): ModelOverride | undefined {
+  return Object.hasOwn(config.models, id) ? config.models[id] : undefined;
+}
+
 /**
  * Normalise a gateway root. Accepts it with or without a trailing `/v1` and trailing slashes,
  * because both forms are common in gateway docs; the transports re-add `/v1` where they need it.
@@ -217,11 +242,11 @@ function parseModelOverride(raw: unknown, where: string, warnings: string[]): Mo
 }
 
 function parseHeaders(raw: unknown, where: string, warnings: string[]): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (raw === undefined) return headers;
+  const headers: Array<[string, string]> = [];
+  if (raw === undefined) return {};
   if (!isRecord(raw)) {
     warnings.push(`${where}: "headers" must be an object of strings; ignored`);
-    return headers;
+    return {};
   }
   for (const [name, value] of Object.entries(raw)) {
     if (!HEADER_NAME_RE.test(name) || typeof value !== "string" || hasControlChars(value)) {
@@ -234,9 +259,9 @@ function parseHeaders(raw: unknown, where: string, warnings: string[]): Record<s
       warnings.push(`${where}: header ${JSON.stringify(name)} must not be set here; use apiKeyEnv or tokenFile`);
       continue;
     }
-    headers[lower] = value;
+    headers.push([lower, value]);
   }
-  return headers;
+  return Object.fromEntries(headers);
 }
 
 function headerName(value: unknown): string | undefined {
@@ -289,19 +314,19 @@ export function parseAuthHeaderEnv(raw: string, warnings: string[]): Partial<Rec
  * but does not list (`gpt-6-luna=openai-responses,acme/glm-5-3=openai-completions`).
  */
 export function parseExtraModelsEnv(raw: string, warnings: string[]): Record<string, ModelOverride> {
-  const models: Record<string, ModelOverride> = {};
+  const models: Array<[string, ModelOverride]> = [];
   for (const part of raw.split(",")) {
     if (!part.trim()) continue;
     const separator = part.lastIndexOf("=");
     const id = part.slice(0, Math.max(separator, 0)).trim();
     const api = part.slice(separator + 1).trim();
-    if (separator <= 0 || !id || /\s/.test(id) || id.length > 256 || hasControlChars(id) || !isGatewayApi(api)) {
+    if (separator <= 0 || !isValidModelId(id) || !isGatewayApi(api)) {
       warnings.push(`${ENV.extraModels}: ${JSON.stringify(part.trim())} must be <model-id>=<${GATEWAY_APIS.join("|")}>; ignored`);
       continue;
     }
-    models[id] = { api };
+    models.push([id, { api }]);
   }
-  return models;
+  return Object.fromEntries(models);
 }
 
 /** Parse one `providers.<id>` entry. Returns undefined (with a warning) when it cannot be used. */
@@ -370,10 +395,16 @@ export function parseProviderEntry(
   }
   if (raw.models !== undefined) {
     if (isRecord(raw.models)) {
+      const models: Array<[string, ModelOverride]> = [];
       for (const [modelId, override] of Object.entries(raw.models)) {
+        if (!isValidModelId(modelId)) {
+          warnings.push(`${where}.models: model id ${JSON.stringify(modelId.slice(0, 64))} is invalid (1-${MAX_MODEL_ID_LENGTH} characters, no whitespace or control characters); skipped`);
+          continue;
+        }
         const parsed = parseModelOverride(override, `${where}.models.${modelId}`, warnings);
-        if (parsed) config.models[modelId] = parsed;
+        if (parsed) models.push([modelId, parsed]);
       }
+      config.models = Object.fromEntries(models);
     } else {
       warnings.push(`${where}: "models" must be an object keyed by model id; ignored`);
     }
@@ -483,7 +514,7 @@ export function mergeProviders(fromEnv: GatewayConfig[], fromFile: GatewayConfig
       models: Object.fromEntries(
         [...new Set([...Object.keys(provider.models), ...Object.keys(file.models)])].map((modelId) => [
           modelId,
-          { ...provider.models[modelId], ...file.models[modelId] },
+          { ...modelOverride(provider, modelId), ...modelOverride(file, modelId) },
         ]),
       ),
     });

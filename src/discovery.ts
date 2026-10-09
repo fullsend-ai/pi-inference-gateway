@@ -15,7 +15,7 @@ import type {
   OpenAIResponsesCompat,
   ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import { authHeaderFor, hasControlChars, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
+import { authHeaderFor, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
 
 export const LIMITS = {
   maxIdLength: 256,
@@ -185,13 +185,13 @@ function firstDefined<T>(...values: (T | undefined)[]): T | undefined {
 export function parseModelEntry(raw: unknown): GatewayModelEntry | undefined {
   if (typeof raw === "string") {
     const id = cleanString(raw, LIMITS.maxIdLength);
-    return id === undefined || /\s/.test(id) ? undefined : { id, endpoints: [], owners: [] };
+    return id !== undefined && isValidModelId(id) ? { id, endpoints: [], owners: [] } : undefined;
   }
   if (!isRecord(raw)) return undefined;
   const info = isRecord(raw.model_info) ? { ...raw.model_info, ...raw } : raw;
 
   const id = cleanString(firstDefined(info.id, info.model_name, info.model, info.name), LIMITS.maxIdLength);
-  if (id === undefined || /\s/.test(id)) return undefined;
+  if (id === undefined || !isValidModelId(id)) return undefined;
 
   const entry: GatewayModelEntry = { id, endpoints: [], owners: [] };
   const name = cleanString(firstDefined(info.display_name, info.displayName), LIMITS.maxNameLength);
@@ -432,7 +432,7 @@ export function selectApi(
   config: Pick<GatewayConfig, "models" | "defaultApi">,
   match: CatalogMatch | undefined = findCatalogModel(entry.id),
 ): GatewayApi {
-  const override = config.models[entry.id]?.api;
+  const override = modelOverride(config, entry.id)?.api;
   if (override) return override;
 
   if (entry.api) return entry.api;
@@ -524,7 +524,7 @@ function withApi(
 export function buildModel(entry: GatewayModelEntry, config: GatewayConfig): GatewayModel {
   const catalogMatch = findCatalogModel(entry.id);
   const catalog = catalogMatch?.model;
-  const override = config.models[entry.id] ?? {};
+  const override = modelOverride(config, entry.id) ?? {};
   const api = selectApi(entry, config, catalogMatch);
 
   const vision = firstDefined(
