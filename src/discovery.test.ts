@@ -315,6 +315,75 @@ describe("fetchModelList", () => {
   });
 });
 
+describe("discovery error bodies without a content-type", () => {
+  const TOKEN = "tok-untyped-0123456789"; // gitleaks:allow (test fixture)
+  /** A byte body sets no content-type, unlike a string body (text/plain). */
+  const untyped = (status: number, body: string | Uint8Array<ArrayBuffer>, headers: Record<string, string> = {}): FetchFunction =>
+    async () => {
+      const response = new Response(typeof body === "string" ? new TextEncoder().encode(body) : body, { status, headers });
+      assert.equal(response.headers.get("content-type"), headers["content-type"] ?? null);
+      return response;
+    };
+  const http = (status: number, detail?: string) => ({
+    message: `model list request returned HTTP ${status}${detail === undefined ? "" : `: ${detail}`}`,
+  });
+
+  it("shows a short plain body", async () => {
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: untyped(401, "invalid API key") }), http(401, "invalid API key"));
+  });
+
+  it("treats an empty content-type like a missing one", async () => {
+    const fetch = untyped(401, "invalid API key", { "content-type": "" });
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch }), http(401, "invalid API key"));
+  });
+
+  it("redacts the credential", async () => {
+    const fetch = untyped(401, `invalid API key ${TOKEN}`);
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch }), http(401, "invalid API key [redacted]"));
+  });
+
+  it("truncates a long body without keeping a credential prefix", async () => {
+    for (let offset = 480; offset <= 512; offset++) {
+      const body = `${" ".repeat(offset - 1)}a${TOKEN}${"b".repeat(600)}`;
+      await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: untyped(401, body) }), (error: Error) => {
+        for (let length = 1; length <= TOKEN.length; length++) {
+          assert.ok(!error.message.includes(`a${TOKEN.slice(0, length)}`), `offset ${offset}: prefix of length ${length} kept`);
+        }
+        return true;
+      });
+    }
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: untyped(500, "x".repeat(5000)) }), (error: Error) => {
+      assert.match(error.message, /^model list request returned HTTP 500: x{200}…$/);
+      return true;
+    });
+  });
+
+  it("keeps a multi-byte character cut by the read limit from hiding the body", async () => {
+    // One ASCII byte first, so the 512-byte cut lands inside a two-byte "é".
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: untyped(500, `a${"é".repeat(600)}`) }), (error: Error) => {
+      assert.match(error.message, /^model list request returned HTTP 500: aé{199}…$/);
+      return true;
+    });
+  });
+
+  it("omits the body when a credential is shorter than 8 characters", async () => {
+    await assert.rejects(discoverModels(config(), { token: "k9z", fetch: untyped(401, "token k9z rejected") }), http(401, "(body omitted)"));
+  });
+
+  it("still does not echo JSON or HTML bodies", async () => {
+    const json = untyped(401, `{"error":"invalid API key"}`, { "content-type": "application/json" });
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: json }), http(401));
+    const html = untyped(502, "<html>bad</html>", { "content-type": "text/html" });
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: html }), http(502));
+  });
+
+  it("adds nothing for an empty or non-UTF-8 body", async () => {
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: untyped(401, "") }), http(401));
+    const binary = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xff, 0xfe, 0x41]);
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: untyped(401, binary) }), http(401));
+  });
+});
+
 describe("selectApi precedence", () => {
   const entry = (fields: Record<string, unknown>) => {
     const parsed = parseModelEntry({ id: "custom-model", ...fields });

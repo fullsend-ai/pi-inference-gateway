@@ -39,6 +39,13 @@ Set `models["<id>"].api` to the right transport.
 **A model works with curl but is not in the list.** The gateway does not list it. Add it with an
 `api` (config `models` or `INFERENCE_GATEWAY_EXTRA_MODELS`).
 
+**`Model "<id>" not found for provider "<provider>"` for a model the gateway lists.** pi runs
+offline (`--offline` or `PI_OFFLINE`, as sandboxes and CI runners usually do) or with
+`INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS=0`, so the list is not fetched, and this
+`PI_CODING_AGENT_DIR` has no list saved by an interactive refresh. Add the model with its `api`
+(config `models` or `INFERENCE_GATEWAY_EXTRA_MODELS`); see
+[Sandboxes and CI](configuration.md#sandboxes-and-ci).
+
 **`[pi-inference-gateway] gateway: token file ... is missing or empty`.** The token file configured
 by `INFERENCE_GATEWAY_TOKEN_FILE` or `tokenFile` is not there yet; models are not offered until it is.
 
