@@ -79,9 +79,11 @@ everything machine-specific out of it:
 - **`inference-gateway.local.json`**, in the same directory (`~/.pi/agent`, or
   `$PI_CODING_AGENT_DIR`), is merged over the shared file per provider and per model. An overlay
   value replaces the shared one, except that two objects (`headers`, `authHeader`, a model's
-  `compat`, `thinkingLevelMap` or `cost`) are merged key by key. Setting `baseUrl` or `baseUrlEnv`
-  in the overlay replaces both. A missing overlay is silent; a malformed or unreadable one is
-  reported with its own path and then ignored, so the shared file applies alone.
+  `compat`, `thinkingLevelMap` or `cost`) are merged key by key. Three pairs each count as one
+  setting: `baseUrl`/`baseUrlEnv`, `apiKeyEnv`/`tokenFile` and `passwordEnv`/`passwordFile`.
+  Setting either key of a pair in the overlay replaces both, so a shared `tokenFile` never follows
+  a local `baseUrl` and `apiKeyEnv` to another gateway. A missing overlay is silent; a malformed or
+  unreadable one is reported with its own path and then ignored, so the shared file applies alone.
 
 Shared file, safe to publish:
 

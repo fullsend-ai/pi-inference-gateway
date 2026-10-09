@@ -929,6 +929,86 @@ describe("local overlay file", () => {
     assert.deepEqual(corp.include, ["claude-*"]);
   });
 
+  describe("credential pairs count as one key", () => {
+    const merge = async (sharedEntry: Record<string, unknown>, localEntry: Record<string, unknown>) => {
+      const { providers, warnings } = await loadConfig({
+        env: {},
+        home: HOME,
+        readText: files({
+          [SHARED]: JSON.stringify({ providers: { corp: { baseUrl: "https://shared.example.com", ...sharedEntry } } }),
+          [LOCAL]: JSON.stringify({ providers: { corp: localEntry } }),
+        }),
+      });
+      assert.deepEqual(warnings, []);
+      assert.equal(providers.length, 1);
+      return providers[0];
+    };
+
+    it("drops the shared tokenFile when the overlay sets apiKeyEnv for another gateway", async () => {
+      const corp = await merge({ tokenFile: "/secrets/shared-token" }, { baseUrl: "http://127.0.0.1:4000", apiKeyEnv: "LAB_KEY" });
+      assert.equal(corp.baseUrl, "http://127.0.0.1:4000");
+      assert.equal(corp.apiKeyEnv, "LAB_KEY");
+      assert.equal(corp.tokenFile, undefined);
+      // resolveToken reads tokenFile first: the shared file must not be read for the overlay's URL.
+      const read: string[] = [];
+      const token = await resolveToken(corp, { LAB_KEY: "lab-key" }, async (path) => {
+        read.push(path);
+        return "shared-token";
+      });
+      assert.equal(token, "lab-key");
+      assert.deepEqual(read, []);
+    });
+
+    it("drops the shared passwordFile when the overlay sets passwordEnv", async () => {
+      const corp = await merge({ passwordFile: "/secrets/shared-password" }, { passwordEnv: "LAB_PASSWORD" });
+      assert.equal(corp.passwordEnv, "LAB_PASSWORD");
+      assert.equal(corp.passwordFile, undefined);
+    });
+
+    it("drops the shared variable when the overlay sets the file", async () => {
+      const corp = await merge(
+        { apiKeyEnv: "CORP_KEY", passwordEnv: "CORP_PASSWORD" },
+        { tokenFile: "/secrets/lab-token", passwordFile: "/secrets/lab-password" },
+      );
+      assert.equal(corp.apiKeyEnv, undefined);
+      assert.equal(corp.tokenFile, "/secrets/lab-token");
+      assert.equal(corp.passwordEnv, undefined);
+      assert.equal(corp.passwordFile, "/secrets/lab-password");
+    });
+
+    it("keeps both keys of a pair the overlay does not name", async () => {
+      const corp = await merge(
+        { tokenFile: "/secrets/shared-token", passwordFile: "/secrets/shared-password" },
+        { headers: { "x-site": "lab" } },
+      );
+      assert.equal(corp.baseUrl, "https://shared.example.com");
+      assert.equal(corp.tokenFile, "/secrets/shared-token");
+      assert.equal(corp.passwordFile, "/secrets/shared-password");
+      assert.deepEqual(corp.headers, { "x-site": "lab" });
+
+      const onlyPassword = await merge({ tokenFile: "/secrets/shared-token", passwordEnv: "CORP_PASSWORD" }, { passwordFile: "/secrets/lab-password" });
+      assert.equal(onlyPassword.tokenFile, "/secrets/shared-token");
+      assert.equal(onlyPassword.passwordEnv, undefined);
+      assert.equal(onlyPassword.passwordFile, "/secrets/lab-password");
+    });
+
+    it("leaves another provider's credentials alone", async () => {
+      const { providers, warnings } = await loadConfig({
+        env: {},
+        home: HOME,
+        readText: files({
+          [SHARED]: JSON.stringify({ providers: { corp: { baseUrl: "https://shared.example.com", tokenFile: "/secrets/shared-token" } } }),
+          [LOCAL]: JSON.stringify({ providers: { lab: { baseUrl: "http://127.0.0.1:4001", apiKeyEnv: "LAB_KEY" } } }),
+        }),
+      });
+      assert.deepEqual(warnings, []);
+      const byId = Object.fromEntries(providers.map((provider) => [provider.id, provider]));
+      assert.equal(byId.corp.tokenFile, "/secrets/shared-token");
+      assert.equal(byId.lab.tokenFile, undefined);
+      assert.equal(byId.lab.apiKeyEnv, "LAB_KEY");
+    });
+  });
+
   it("reads the overlay from PI_CODING_AGENT_DIR and keeps __proto__ an ordinary key", async () => {
     const local = '{"providers":{"corp":{"models":{"__proto__":{"api":"openai-completions"}}}}}';
     const { providers } = await loadConfig({
@@ -1020,6 +1100,16 @@ describe("config shipped in the extension directory", () => {
       compat: { supportsMidConvoEffort: false, supportsStrictTools: false },
     });
     assert.deepEqual(gateway.models["gpt-6-luna"], { api: "openai-responses", maxTokens: 16384 });
+  });
+
+  it("does not carry a shipped tokenFile to a user-level provider with its own base URL and key", async () => {
+    const shippedToken = JSON.stringify({ providers: { corp: { baseUrl: "https://shipped.example.com", tokenFile: "/opt/secrets/token" } } });
+    const user = JSON.stringify({ providers: { corp: { baseUrl: "https://corp.example.com", apiKeyEnv: "CORP_KEY" } } });
+    const { providers, warnings } = await loadConfig({ env: {}, home: HOME, extensionDir: EXT, readText: files({ [EXT_SHARED]: shippedToken, [SHARED]: user }) });
+    assert.deepEqual(warnings, []);
+    assert.equal(providers[0].baseUrl, "https://corp.example.com");
+    assert.equal(providers[0].apiKeyEnv, "CORP_KEY");
+    assert.equal(providers[0].tokenFile, undefined);
   });
 
   it("merges the extension directory's overlay over its shared file, under both agent-directory files", async () => {

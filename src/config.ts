@@ -702,13 +702,21 @@ function mergeModelEntry(base: unknown, over: unknown): unknown {
   return isRecord(base) && isRecord(over) ? mergeEach(base, over, mergeShallow) : over;
 }
 
-const BASE_URL_KEYS: readonly string[] = ["baseUrl", "baseUrlEnv"];
+/**
+ * Keys that form one setting: the overlay naming either key of a pair replaces both. Otherwise a
+ * lower layer's `tokenFile` (which wins over `apiKeyEnv`) would survive a higher layer that points
+ * the provider at another gateway, and send that file's credential there.
+ */
+const PAIRED_KEYS: readonly (readonly string[])[] = [
+  ["baseUrl", "baseUrlEnv"],
+  ["apiKeyEnv", "tokenFile"],
+  ["passwordEnv", "passwordFile"],
+];
 
 function mergeProviderEntry(base: unknown, over: unknown): unknown {
   if (!isRecord(base) || !isRecord(over)) return over;
-  // baseUrl and baseUrlEnv are one setting: the overlay naming either replaces both.
-  const replacesBaseUrl = BASE_URL_KEYS.some((key) => Object.hasOwn(over, key));
-  const kept = Object.entries(base).filter(([key]) => !(replacesBaseUrl && BASE_URL_KEYS.includes(key)));
+  const replaced = PAIRED_KEYS.filter((pair) => pair.some((key) => Object.hasOwn(over, key))).flat();
+  const kept = Object.entries(base).filter(([key]) => !replaced.includes(key));
   const merged = Object.entries(over).map(([key, value]): [string, unknown] => {
     const prior = ownValue(base, key);
     if (key === "models" && isRecord(prior) && isRecord(value)) return [key, mergeEach(prior, value, mergeModelEntry)];
@@ -721,7 +729,8 @@ function mergeProviderEntry(base: unknown, over: unknown): unknown {
  * Merge the local overlay's `providers` over the shared file's, before either is parsed: per
  * provider, then per model id. A key set to an object in both (`headers`, `authHeader`, a model's
  * `compat`, `thinkingLevelMap` or `cost`) is merged one level deep; any other overlay value
- * replaces the shared one. `baseUrl` and `baseUrlEnv` count as one key.
+ * replaces the shared one. Each pair counts as one key: `baseUrl`/`baseUrlEnv`,
+ * `apiKeyEnv`/`tokenFile` and `passwordEnv`/`passwordFile`.
  */
 export function mergeConfigOverlay(shared: Record<string, unknown>, overlay: Record<string, unknown>): Record<string, unknown> {
   return mergeEach(shared, overlay, mergeProviderEntry);
