@@ -237,6 +237,82 @@ What changed:
    models, `INFERENCE_GATEWAY_PROVIDER_ID=praxis`, known limits) and a Security section. The package
    name and default provider id stay generic.
 
+## agentgateway support (2026-10-09)
+
+agentgateway (github.com/agentgateway/agentgateway, Apache-2.0) at `9d36620d`, `llm:` mode, is the
+second documented and tested gateway. Deltas from the research (D1–D9) and what was done:
+
+| # | Delta | Done |
+|---|---|---|
+| D1 | Every list entry is `owned_by: "openai"`, so Claude went to `/v1/responses` (a 400) | Selection order changed: pi catalog under anthropic/openai and the `claude-` id now run **before** the owner. Order: config `api` → endpoint hints → catalog anthropic/openai → `claude-` → non-ambiguous owner → catalog other provider (completions) → `defaultApi`. Consequence: a model nothing else identifies follows `owned_by: "openai"` to Responses, which agentgateway translates; the README shows `api: "openai-completions"` for Gemini/open-weight ids. |
+| D2 | JWT read only from `Authorization: Bearer`, on every path | Docs: `INFERENCE_GATEWAY_AUTH_HEADER=bearer` (existing key). |
+| D3 | Wildcard ids (`openai/*`) listed literally | Dropped in `parseModelList`, one warning pointing at `models`. |
+| D4 | `/v1/models` carries no metadata | Docs only; metadata comes from pi's catalog or config. |
+| D5 | Errors are `text/plain` | Discovery errors append a redacted, truncated text/plain body. Inference errors: pi's transports already include the body (pinned by a test); no hook needed. |
+| D6 | `reasoning_effort` is a closed enum on chat | Config, not code: per-model `thinkingLevelMap` override, README entry (see "Generality audit"). |
+| D7 | Gemini signature rides in the tool-call id | README note, expected behaviour, not verified live. |
+| D8 | Base URL is the root or root + `llm.pathPrefix`, no `/v1` | README. |
+| D9 | Never send `fallbacks` | Already the case (`allowedFallbackModels` never copied); kept. |
+
+Mock: `node scripts/mock-gateway.mjs --mode agentgateway`.
+
+## Lessons from other pi gateway extensions (2026-10-09)
+
+Adopted from the research survey's adopt list:
+
+1. A fetched list with no usable model (empty, all malformed/wildcard/non-chat) is a failure: the
+   startup falls back, a refresh keeps the last list. (Supersedes review fix 3's "an empty list
+   clears the provider".)
+2. `PI_OFFLINE` (any set value, as pi's runtime treats it) and `INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS`
+   (`0` skips) gate the startup discovery; skipping is silent.
+3. Non-chat entries (LiteLLM `mode`/`type`, output modalities without text) are dropped before the
+   1000-model cap.
+4. Opt-in `sessionAffinity`: pi's `sendSessionAffinityHeaders` compat on Messages/Completions, the
+   session id hashed in the request options, `prompt_cache_key` on Completions via `onPayload`.
+5. Persisted snapshots carry `etag: "pi-inference-gateway/2"` (`SNAPSHOT_STAMP`); an unstamped or
+   older snapshot has its `api` re-derived. `etag` is used because `ModelsStoreEntry` has no other
+   free-form field and pi reads it only in the remote-catalog wrapper around built-in providers.
+   Bump the stamp whenever selectApi changes.
+6. `maxTokens ≤ contextWindow`; one warning when a gateway window is 4x or more off pi's catalog.
+
+Also from the survey: a regression test pins that `gatewayAuth().resolve()` never returns a
+`baseUrl` (pi's `ModelAuth.baseUrl` would override every model's, breaking the root vs `/v1` split).
+
+## Live Praxis test findings (2026-10-09)
+
+A live run against a Praxis deployment passed on pi 0.99.2 and 1.1.0 (discovery, all three APIs,
+tool calls, thinking, URL binding, a wrong key, an unreachable base URL). Findings:
+
+- E1: Claude through a non-first-party backend rejects pi's mid-conversation effort message
+  (`output_config: Extra inputs are not permitted`). Config + README
+  (`compat.supportsMidConvoEffort: false`), no code (see "Generality audit").
+- E2: a cloud project's partner-model policy can reject strict tools: README
+  (`compat.supportsStrictTools: false`).
+- E3: older vLLM rejects every enabled `thinking` on `/v1/messages`: README
+  (`compat.forceAdaptiveThinking: true`); fixed upstream in vllm-project/vllm#58786.
+- E4: a file provider with the env provider's id and another `baseUrl` now gets a warning that the
+  file's `baseUrl` is ignored.
+- E5: README notes on gateway limits, override-only entries not being fallbacks, `</dev/null` for
+  `pi -p`, and thinking appearing only on reasoning prompts.
+- E6: the Gemini `thought_signature` limitation is confirmed live (turn 2 → 400). README updated.
+
+## Deferred follow-ups
+
+Not implemented; in priority order:
+
+1. **Upstream: pi-ai openai-completions should replay provider-specific assistant fields** (Gemini
+   `extra_content.google.thought_signature`). The fix belongs in pi. Here only a generic hook that
+   replays unknown provider fields for any model would be acceptable, never a Gemini branch.
+2. **Upstream: pi-ai catalog compat `supportsMidConvoEffort`** assumes the first-party Anthropic
+   transport; ask for a documented way, or per-endpoint compat.
+3. **Per-API base path** (`apiBasePaths` keyed by API in `baseUrlFor`), for gateways that mount
+   Messages or the OpenAI APIs under a prefix.
+4. **Keep a catalog `api` when it is one of the three** (xai → Responses, minimax → Messages)
+   instead of mapping every other-provider hit to Completions. Contradicts "Live gateway findings"
+   point 3, so validate against a live gateway first.
+5. **An explain command** (`/gateway-models [id]`): the chosen API, the rule that chose it, and
+   where each metadata field came from.
+
 ## Generality audit (2026-10-09)
 
 Rule (AGENTS.md): no dependency-specific workarounds in code. A dependency problem is handled by

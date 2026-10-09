@@ -15,6 +15,7 @@ import {
   SNAPSHOT_STAMP,
   createGatewayProvider,
   factoryDiscovery,
+  gatewayAuth,
   gatewayProviderOptions,
   initialModels,
   registerGateways,
@@ -362,6 +363,21 @@ describe("lesson 4: opt-in session affinity with a hashed session id", () => {
       readText: async () => undefined,
     });
     assert.match(bad.warnings.join("\n"), /INFERENCE_GATEWAY_SESSION_AFFINITY: must be/);
+  });
+});
+
+describe("auth never returns a baseUrl", () => {
+  it("gatewayAuth().resolve() sets no auth.baseUrl, for a token or for Basic", async () => {
+    // pi-ai models.js: a ModelAuth.baseUrl replaces every model's baseUrl, which would break the
+    // root (Messages) vs root/v1 (OpenAI) split this provider relies on.
+    for (const env of [{ GW_KEY: "tok" }, { GW_PASS: "pw" }]) {
+      const result = await gatewayAuth(config({ passwordEnv: "GW_PASS" }), { env }).resolve({
+        ctx: { env: async () => undefined, fileExists: async () => false },
+        signal: new AbortController().signal,
+      });
+      assert.ok(result);
+      assert.equal("baseUrl" in result.auth, false);
+    }
   });
 });
 

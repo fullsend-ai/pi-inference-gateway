@@ -37,6 +37,8 @@ export INFERENCE_GATEWAY_API_KEY=...                             # your gateway 
 | `INFERENCE_GATEWAY_BASIC_USER` | Basic-auth username — see [Auth](#auth). | `gateway` |
 | `INFERENCE_GATEWAY_BASIC_PASSWORD` / `_PASSWORD_FILE` | Basic-auth password, or a file holding it (re-read per request). | — |
 | `INFERENCE_GATEWAY_EXTRA_MODELS` | Models the gateway serves but does not list: `id=api,id=api`. | — |
+| `INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS` | How long pi's startup waits for the model list; `0` skips it (see [When the model list changes](#when-the-model-list-changes)). | `5000` |
+| `INFERENCE_GATEWAY_SESSION_AFFINITY` | `1` sends a hashed session id for gateway affinity and caching (see [Session affinity](#session-affinity)). | off |
 
 No `pi login`: auth is ambient. Without a key or token file the gateway's models are registered but
 not offered.
@@ -113,6 +115,7 @@ For several gateways, per-model overrides or models the gateway does not list, a
 | `include` / `exclude` | `*` globs over listed model ids. |
 | `models` | Per-id overrides: `api`, `name`, `contextWindow`, `maxTokens`, `reasoning`, `input` (`["text","image"]`), `cost` (USD per million tokens), `compat` (see [Request features (`compat`)](#request-features-compat)), `thinkingLevelMap` (what each thinking level is sent as, see [Thinking levels](#thinking-levels-thinkinglevelmap)). **An entry with an `api` whose id the gateway does not list adds that model.** |
 | `fallbackModels` | Offered when discovery fails: ids or `{ "id": ..., "owned_by": ... }` objects. |
+| `sessionAffinity` | `true` as `INFERENCE_GATEWAY_SESSION_AFFINITY=1`. |
 
 When `INFERENCE_GATEWAY_BASE_URL` is also set, it configures the provider with the same id
 (`gateway` by default): the environment supplies the base URL, key and default API; the file adds the
@@ -206,9 +209,10 @@ hi from /v1/chat/completions as oss/zai-org/glm-5-3
 
 When a model is in pi's built-in catalog on the same transport, it inherits pi's `compat` flags for
 it: which optional request features pi uses (strict tools, extra tool kinds, a vendor's thinking
-format, ...). Those flags describe the vendor's own API. A gateway that translates the request
-for another backend may reject some of them with a 400 naming an unknown field. Switch them off per
-model:
+format, mid-conversation effort changes, ...). Those flags describe pi's transport to the vendor's
+**own** API. A gateway, or the backend behind it (a cloud-hosted Claude, a self-hosted open-weight
+server), may not support all of them and answers with a 400 naming a field. The extension does not
+guess which; switch off what your gateway rejects, per model:
 
 ```json
 "models": {
@@ -217,8 +221,10 @@ model:
 }
 ```
 
-An object is merged over the inherited flags (set a flag to `false` to turn a feature off); `null`
-drops the inherited flags entirely, so pi falls back to its plain defaults for that transport.
+An object is merged over the inherited flags (set a flag to `false` to turn a feature off, or
+`true` to turn one on); `null` drops the inherited flags entirely, so pi falls back to its plain
+defaults for that transport. Recipes for errors seen through gateways are in
+[Troubleshooting](#troubleshooting).
 Values must be booleans, strings or numbers. Flags pi declares for the model's API are checked
 against pi's own types (booleans, numbers, and enums such as `maxTokensField` or `thinkingFormat`);
 a wrong-typed value is dropped with a warning. Flag names pi does not declare pass through
@@ -250,10 +256,49 @@ copied map; `"thinkingLevelMap": null` drops the copied map, so pi sends its own
 ## When the model list changes
 
 `pi -p` and `pi --list-models` never refresh model lists from the network, so the extension asks the
-gateway itself while pi starts (5 s timeout). In an interactive session pi also refreshes in the
-background, and `/gateway-refresh` forces it. If the gateway cannot be reached at startup you get
-the config's `fallbackModels`, config-added models, and the list pi saved from its last interactive
-refresh.
+gateway itself while pi starts (5 s timeout, `INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS` to change it).
+In an interactive session pi also refreshes in the background, and `/gateway-refresh` forces it. If
+the gateway cannot be reached at startup you get the config's `fallbackModels`, config-added models,
+and the list pi saved from its last interactive refresh.
+
+- **Offline:** with `pi --offline` or `PI_OFFLINE` set (any value, as pi itself treats it), or
+  `INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS=0`, the startup request is skipped silently and you get the
+  same fallback set.
+- **A list with no usable model is a failure**, not an empty catalog: an empty list, or one whose
+  every entry is malformed, a wildcard or a non-chat model, keeps the last good list.
+- **Dropped entries:** ids containing `*` (a routing pattern, not a model; one warning names them)
+  and non-chat models (LiteLLM `mode` or a `type` such as `embedding`, `image_generation`,
+  `audio_transcription`, `rerank`, `moderation`; or `architecture.output_modalities` without text).
+- **Context windows:** `maxTokens` never exceeds `contextWindow`. A gateway window 4x or more off
+  pi's catalog for the same model is used, with one warning: relays sometimes report a placeholder.
+- **Saved lists are stamped**, so a model restored from a list saved by an older version of this
+  extension has its API re-chosen by the current rules.
+
+## Session affinity
+
+Off by default. With `"sessionAffinity": true` (or `INFERENCE_GATEWAY_SESSION_AFFINITY=1`), every
+request carries pi's session id **hashed** (`pi-` + 32 hex characters of SHA-256; the raw id never
+leaves the process): as pi's affinity headers (`x-session-affinity` and friends) on Messages and
+Chat Completions, as `prompt_cache_key` on Chat Completions, and in place of the raw id that pi's
+Responses transport sends natively. A gateway can then keep a session on one backend and hit its
+prompt cache. Turn the headers off for one model with
+`"compat": { "sendSessionAffinityHeaders": false }`.
+
+## Gateway limits below pi's catalog
+
+Context window and output limits come from the gateway's list, then pi's catalog. A gateway often
+caps them lower than the vendor does, and most lists carry no limits at all. Set them per model:
+
+```json
+"models": {
+  "claude-sonnet-5": { "contextWindow": 200000, "maxTokens": 32000 },
+  "gpt-6-luna": { "api": "openai-responses", "contextWindow": 128000, "maxTokens": 16384 }
+}
+```
+
+An entry without `api` only overrides a model the gateway lists: when discovery fails it is not
+offered as a fallback, and `pi --model gateway/<id>` then warns `Model not found ... using custom
+model id`. Add its `api` to keep it available.
 
 ## Praxis
 
@@ -344,6 +389,157 @@ in the per-API mode (`node scripts/mock-gateway.mjs 47811`, `INFERENCE_GATEWAY_A
 - Models inherit pi's catalog `compat` flags; if Praxis or its backend rejects a request field, turn
   the flag off per model ([Request features (`compat`)](#request-features-compat)).
 
+## agentgateway
+
+[agentgateway](https://github.com/agentgateway/agentgateway) (Apache-2.0, Linux Foundation) is the
+second gateway this extension is tested against, in its `llm:` config mode. Notes below are from
+agentgateway at commit `9d36620d` (one week after v1.6.0); the walkthrough runs against the mock
+gateway in this repo, started in its agentgateway mode.
+
+### What you get
+
+- **One listener, three paths.** agentgateway picks the backend from the request body's `model`;
+  the path (`/v1/messages`, `/v1/responses`, `/v1/chat/completions`) only says which format the
+  request is in, and agentgateway translates between formats where it can. The extension still
+  sends each model over its native protocol: Claude to Messages, GPT to Responses, everything else
+  to Chat Completions.
+- **A per-caller model list.** `GET /v1/models` is synthesised by agentgateway from its config,
+  filtered by each model's authorization rules. A model missing for one caller means that caller is
+  not authorised for it (the same model is a 403 on request).
+- **No metadata in the list.** Every entry is `owned_by: "openai"` with no context window, modalities
+  or endpoints. The extension routes Claude by pi's catalog and the `claude-` id before it looks at
+  the owner, and fills metadata from pi's catalog or your config.
+
+### Gateway side: must-haves
+
+A CI OIDC token as the client's Bearer token (the WIF shape), with placeholder issuer and audience:
+
+```yaml
+llm:
+  policies:
+    jwtAuth:
+      mode: strict                       # the default, optional, lets requests without a token through
+      providers:
+      - issuer: https://token.actions.example.com
+        audiences: [https://gateway.example.com]
+        jwks: { url: https://token.actions.example.com/.well-known/jwks }   # remote JWKS
+  models:
+  - name: claude-sonnet-5
+    provider: anthropic
+    authorization:
+      rules:
+      - allow: 'jwt.repository == "example-org/example-repo"'
+  - name: gpt-6-luna
+    provider: openAI
+```
+
+- `jwtAuth.mode: strict`, a remote JWKS URL and `audiences` are the minimum; per-model
+  authorization rules also filter `/v1/models`, so each caller lists only what it may use.
+- **Never use a CEL `location.expression` for the token** (for example to also accept `x-api-key`).
+  agentgateway does not strip a token read that way, so the caller's JWT would be forwarded to the
+  model provider. Send Bearer from the client instead (below).
+- `discovery: disabled` lists wildcard models such as `openai/*` literally; the extension drops them
+  with a warning. Add the concrete ids you use with `models` in the config file.
+
+### Extension side
+
+agentgateway reads the JWT from `Authorization: Bearer` only, **on every path**, including
+`/v1/messages`, where pi natively sends `x-api-key`. Switch every API to Bearer, and point the
+token file at the token your CI runner rewrites (it is re-read on every request, so rotation needs no
+restart):
+
+```bash
+export INFERENCE_GATEWAY_BASE_URL=https://gateway.example.com   # the root, or root + llm.pathPrefix; no /v1
+export INFERENCE_GATEWAY_TOKEN_FILE=/path/to/oidc-token         # minted with the gateway's audience
+export INFERENCE_GATEWAY_AUTH_HEADER=bearer                     # Bearer on all three APIs and discovery
+```
+
+or, in the config file, `"authHeader": "bearer"` (or only `{ "anthropic-messages": "bearer" }`,
+since the other targets already default to Bearer). This is the inverse of the per-API Praxis setup.
+
+Models nothing identifies (no pi catalog entry under `anthropic`/`openai`, no `claude-` id) take the
+`owned_by: "openai"` hint and go to Responses, which agentgateway translates for a chat backend. To
+use Chat Completions directly, give them an `api`:
+
+```json
+{ "providers": { "gateway": { "baseUrl": "https://gateway.example.com", "authHeader": "bearer",
+  "models": { "gemini-3.5-flash": { "api": "openai-completions" },
+              "oss/zai-org/glm-5-3": { "api": "openai-completions" } } } } }
+```
+
+### Walkthrough (pi 1.0.2, mock gateway in agentgateway mode)
+
+```bash
+node scripts/mock-gateway.mjs 47813 --mode agentgateway &   # Bearer only, owned_by "openai", an openai/* entry
+export PI_CODING_AGENT_DIR=$(mktemp -d)
+export INFERENCE_GATEWAY_BASE_URL=http://127.0.0.1:47813
+export INFERENCE_GATEWAY_API_KEY=test-token                 # a token file in CI, as above
+export INFERENCE_GATEWAY_AUTH_HEADER=bearer
+cat > "$PI_CODING_AGENT_DIR/inference-gateway.json" <<'EOF'
+{ "providers": { "gateway": { "baseUrl": "http://127.0.0.1:47813",
+  "models": { "gemini-3.5-flash": { "api": "openai-completions" },
+              "oss/zai-org/glm-5-3": { "api": "openai-completions" } } } } }
+EOF
+```
+
+```console
+$ pi -ne -e . --list-models | grep -E '^(provider|gateway) |pi-inference-gateway'
+[pi-inference-gateway] gateway: ignored wildcard model id(s) openai/*: the gateway lists a routing pattern, not a model; add concrete ids via "models" in the config file (or INFERENCE_GATEWAY_EXTRA_MODELS)
+provider  model                     context  max-out  thinking  images
+gateway   claude-sonnet-5           1M       128K     yes       yes
+gateway   gemini-3.5-flash          1.0M     65.5K    yes       yes
+gateway   gpt-6-luna                272K     128K     yes       yes
+gateway   oss/zai-org/glm-5-3       1M       131.1K   yes       no
+$ pi -ne -e . --no-session -p --model gateway/claude-sonnet-5 "say hi" </dev/null
+hi from /v1/messages as claude-sonnet-5
+$ pi -ne -e . --no-session -p --model gateway/gemini-3.5-flash "say hi" </dev/null
+hi from /v1/chat/completions as gemini-3.5-flash
+$ pi -ne -e . --no-session -p --model gateway/gpt-6-luna "say hi" </dev/null
+hi from /v1/responses as gpt-6-luna
+$ pi -ne -e . --no-session -p --model gateway/oss/zai-org/glm-5-3 "say hi" </dev/null
+hi from /v1/chat/completions as oss/zai-org/glm-5-3
+```
+
+All four models are listed `owned_by: "openai"`; Claude still goes to `/v1/messages`. The mock's
+log shows `authorization(Bearer)` on every request, `/v1/models` included. The same run passes on
+pi 0.99.2.
+
+### Troubleshooting agentgateway
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `401 authentication failure: no bearer token found` on Claude only | pi's native `x-api-key` on `/v1/messages` | `INFERENCE_GATEWAY_AUTH_HEADER=bearer` |
+| `model discovery failed (model list request returned HTTP 401: ...)` | no token, a wrong or expired token, or a wrong audience | check the token file and the token's `aud` |
+| `400 ... unsupported conversion: from Responses to provider anthropic (supported: [AnthropicMessages])` | a Claude model on `openai-responses` (an `api` in your config, or an old snapshot) | remove the `api`, or set `"anthropic-messages"` |
+| `403 ... Model authorization denied` | a claim rule on that model refuses your token | the gateway's per-model `authorization` rules |
+| `404 ... model_not_found` | an id the gateway does not serve, or a wildcard id | use an id from `--list-models`, or add a concrete one via `models` |
+| `400 ... unknown variant ..., expected one of none, minimal, low, medium, high, xhigh, max` | a `reasoning_effort` value from a copied `thinkingLevelMap` | set it per model, see [Thinking levels](#thinking-levels-thinkinglevelmap) |
+
+These errors are `text/plain`; the extension shows the start of such a body in discovery errors
+(credentials redacted), and pi shows it for model requests (the walkthrough's two failure cases,
+pasted from the mock):
+
+```console
+$ INFERENCE_GATEWAY_AUTH_HEADER= pi -ne -e . --no-session -p --model gateway/claude-sonnet-5 "say hi" </dev/null
+401 authentication failure: no bearer token found
+$ INFERENCE_GATEWAY_API_KEY=wrong pi -ne -e . --list-models
+[pi-inference-gateway] gateway: model discovery failed (model list request returned HTTP 401: authentication failure: no bearer token found); using 1 fallback model(s) plus pi's last saved list
+```
+
+### Known incompatibilities
+
+- Claude cannot be served on `/v1/responses` through agentgateway (a 400; the extension never sends
+  it there unless you configure it).
+- Claude over `/v1/chat/completions` works but loses signed-thinking replay.
+- Non-streaming `/v1/responses` returns a 502 on an output item type agentgateway does not know. pi
+  always streams, so it is not affected.
+- `x-api-key` is never accepted for JWT auth; use Bearer.
+- The classic `routes:` mode does not serve `/v1/models` (501); use the `llm:` mode.
+- Gemini behind an agentgateway Vertex/Gemini provider is expected **not** to hit the
+  [`thought_signature` limitation](#known-limitations): agentgateway carries the signature inside
+  the tool-call id (`<id>__thought__<signature>`), which pi replays verbatim. This is from
+  agentgateway's source and has not been verified against a live Gemini model.
+
 ## Security
 
 - **Credentials go only where you pointed them.** Like Praxis's own OpenCode plugin, which attaches
@@ -387,7 +583,8 @@ pi -ne -e . --list-models
 (`-ne -e .` loads only this checkout's extension; a normal `pi install` needs neither flag.) The mock
 lists a Claude and a Gemini model, accepts only `x-api-key` on `/v1/messages`, and serves the unlisted
 `gpt-*` and `oss/zai-org/glm-5-3` models described above. Start it with `--auth basic` to require
-`Basic gateway:test-pass` on every path instead (see [Praxis](#praxis)).
+`Basic gateway:test-pass` on every path instead (see [Praxis](#praxis)), or with `--mode agentgateway` for Bearer everywhere
+and body-routed models (see [agentgateway](#agentgateway)).
 
 ## Requirements
 
@@ -397,11 +594,15 @@ lists a Claude and a Gemini model, accepts only `x-api-key` on `/v1/messages`, a
 
 ## Known limitations
 
-- **Gemini tool calls over `/v1/chat/completions` may fail after the first turn.** Gemini attaches a
-  `thought_signature` to each tool call (`message.extra_content.google.thought_signature` on an
-  OpenAI-compatible endpoint) and expects it back on the next request. pi's chat-completions
-  transport (pi-ai 0.99.2 through 1.1.0) neither reads nor replays that field, so a gateway that
-  passes it through can reject the follow-up turn. Single-turn prompts and text replies work.
+- **Gemini tool calls over `/v1/chat/completions` fail after the first turn** on a gateway that
+  passes Gemini's OpenAI-compatible responses through. Gemini attaches a `thought_signature` to each
+  tool call (`message.extra_content.google.thought_signature`) and requires it back on the next
+  request. pi's chat-completions transport (pi-ai 0.99.2 through 1.1.0) neither reads nor replays
+  that field, so turn 2 is rejected with `400 Function call is missing a thought_signature in
+  functionCall parts` (confirmed live on a path-routed gateway, pi 0.99.2 and 1.1.0). Single-turn
+  prompts and text replies work. The fix belongs in pi's transport; gateways that carry the
+  signature in the tool-call id, such as [agentgateway](#agentgateway), are expected to be
+  unaffected.
 - **Inherited `compat` flags may not suit your gateway** — see
   [Request features (`compat`)](#request-features-compat).
 
@@ -441,6 +642,29 @@ Set `models["<id>"].api` to the right transport.
 by `INFERENCE_GATEWAY_TOKEN_FILE` or `tokenFile` is not there yet; models are not offered until it is.
 
 **`No API key found for anthropic`.** You used a bare model id. Use `gateway/<model>`.
+
+**Claude: `400 ... messages.1.output_config: Extra inputs are not permitted`.** pi's catalog marks
+Claude as supporting mid-conversation effort changes, which pi sends as an extra effort-only message.
+Anthropic's own API accepts it; a gateway whose Claude backend is not Anthropic's own API (for
+example a cloud-hosted Claude) may not. Switch it off for that model:
+`"models": { "claude-sonnet-5": { "compat": { "supportsMidConvoEffort": false } } }`. Other Claude
+flags such as `supportsMidConvoSystemMessages` do not cause this.
+
+**Claude: `400 ... disallowed feature ...` naming structured output or strict tools.** Some cloud
+projects restrict partner-model features (structured outputs) by organisation policy, and pi sends
+strict tool schemas when the catalog says the model supports them. This is per cloud project, so
+set it only where you see it: `"compat": { "supportsStrictTools": false }`.
+
+**Open-weight model on `/v1/messages`: `400 ... thinking.budget_tokens must be less than max_tokens`
+on every thinking request.** Older vLLM servers reject every `thinking.type: "enabled"` request this
+way (fixed upstream in vllm-project/vllm#58786, vLLM 0.31.0). Until the server is upgraded, set
+`"compat": { "forceAdaptiveThinking": true }` on that model.
+
+**`pi -p` hangs in CI or over ssh.** pi waits on an open, non-terminal stdin. Run
+`pi -p ... </dev/null`.
+
+**No thinking shown.** Thinking events only appear when the prompt makes the model reason; "say hi"
+usually produces none, even on a reasoning model with thinking on.
 
 ---
 
