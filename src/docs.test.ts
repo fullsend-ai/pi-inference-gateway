@@ -14,7 +14,7 @@ const DOCS = join(ROOT, "docs");
 const README_MAX_LINES = 120;
 
 /** GitHub's heading anchor: lowercase, punctuation dropped, each space a hyphen. */
-export function slug(heading: string): string {
+function slug(heading: string): string {
   return heading
     .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
     .trim()
@@ -43,7 +43,7 @@ function proseLines(markdown: string): string[] {
 }
 
 /** Anchors GitHub generates for a file's headings, with -1, -2, ... for repeats. */
-export function anchors(markdown: string): Set<string> {
+function anchors(markdown: string): Set<string> {
   const result = new Set<string>();
   for (const line of proseLines(markdown)) {
     const heading = /^ {0,3}#{1,6}\s+(.*?)(?:\s+#+)?\s*$/.exec(line)?.[1];
@@ -57,7 +57,7 @@ export function anchors(markdown: string): Set<string> {
 }
 
 /** Inline and reference-definition link targets outside fenced blocks and code spans. */
-export function linkTargets(markdown: string): string[] {
+function linkTargets(markdown: string): string[] {
   // A code span is a backtick run closed by a run of the same length, within one paragraph; an
   // unmatched run is literal text and hides nothing.
   const prose = proseLines(markdown)
@@ -83,7 +83,7 @@ function docsPages(): string[] {
 }
 
 /** Problems with one link from `file`, or undefined when it resolves. */
-export function checkLink(file: string, target: string): string | undefined {
+function checkLink(file: string, target: string): string | undefined {
   if (/^[a-z][a-z0-9+.-]*:/i.test(target)) return undefined; // http(s), mailto, ...
   const hash = target.indexOf("#");
   const path = hash === -1 ? target : target.slice(0, hash);
