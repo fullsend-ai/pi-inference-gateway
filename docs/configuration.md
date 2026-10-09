@@ -49,7 +49,7 @@ For several gateways, per-model overrides or models the gateway does not list, a
 
 | Key | Meaning |
 |---|---|
-| `baseUrl` | Gateway root (required). |
+| `baseUrl` / `baseUrlEnv` | Gateway root, or the *name* of the variable holding it (see [Sharing the config file](#sharing-the-config-file)). Exactly one is required. |
 | `apiKeyEnv` / `tokenFile` | *Name* of the variable holding the key, or a path (`~/` allowed) re-read per request. A literal `apiKey`, or an `authorization`/`x-api-key` entry in `headers`, is refused. |
 | `username` / `usernameEnv`, `passwordEnv` / `passwordFile` | Basic-auth credentials (a literal `password` is refused). |
 | `authHeader` | See [Auth headers](#auth). |
@@ -64,6 +64,42 @@ For several gateways, per-model overrides or models the gateway does not list, a
 When `INFERENCE_GATEWAY_BASE_URL` is also set, it configures the provider with the same id
 (`gateway` by default): the environment supplies the base URL, key and default API; the file adds the
 rest. No `!command` keys and no shell-out, by design.
+
+## Sharing the config file
+
+To keep `inference-gateway.json` in a shared or public dotfiles repo (as a symlink, say), leave
+everything machine-specific out of it:
+
+- **`baseUrlEnv`** names the variable holding the base URL, as `apiKeyEnv` names the key's. The
+  value is validated like a literal `baseUrl`. When the variable is unset or empty, the provider is
+  skipped with one warning naming the variable. Credentials from `INFERENCE_GATEWAY_*` variables
+  still only go to `INFERENCE_GATEWAY_BASE_URL` (see [Security](security.md)).
+- **`inference-gateway.local.json`**, in the same directory (`~/.pi/agent`, or
+  `$PI_CODING_AGENT_DIR`), is merged over the shared file per provider and per model. An overlay
+  value replaces the shared one, except that two objects (`headers`, `authHeader`, a model's
+  `compat`, `thinkingLevelMap` or `cost`) are merged key by key. Setting `baseUrl` or `baseUrlEnv`
+  in the overlay replaces both. A missing overlay is silent.
+
+Shared file, safe to publish:
+
+```json
+{ "providers": { "corp": {
+  "baseUrlEnv": "CORP_GATEWAY_URL",
+  "apiKeyEnv": "CORP_GATEWAY_KEY",
+  "models": {
+    "claude-sonnet-5": { "compat": { "supportsMidConvoEffort": false } },
+    "gpt-6-luna": { "api": "openai-responses" }
+  } } } }
+```
+
+Local overlay, kept on this machine:
+
+```json
+{ "providers": { "corp": { "models": {
+  "claude-sonnet-5": { "contextWindow": 200000, "maxTokens": 32000 },
+  "vendor/org/open-model": { "api": "openai-completions", "contextWindow": 262144, "maxTokens": 65536 }
+} } } }
+```
 
 ## Auth
 

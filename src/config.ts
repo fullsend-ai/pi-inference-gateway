@@ -25,6 +25,8 @@ export const DEFAULT_PROVIDER_ID = "gateway";
 export const DEFAULT_API: GatewayApi = "openai-responses";
 export const DEFAULT_MODELS_PATH = "/v1/models";
 export const CONFIG_FILE_NAME = "inference-gateway.json";
+/** Machine-local overlay next to CONFIG_FILE_NAME, merged over it per provider and per model. */
+export const LOCAL_CONFIG_FILE_NAME = "inference-gateway.local.json";
 
 /** Where a token is sent: one of the three transports, or the model-list request. */
 export type AuthTarget = GatewayApi | "discovery";
@@ -453,12 +455,16 @@ export function parseExtraModelsEnv(raw: string, warnings: string[]): Record<str
   return Object.fromEntries(models);
 }
 
-/** Parse one `providers.<id>` entry. Returns undefined (with a warning) when it cannot be used. */
+/**
+ * Parse one `providers.<id>` entry. Returns undefined (with a warning) when it cannot be used.
+ * `env` is only read for `baseUrlEnv`, the variable holding the base URL.
+ */
 export function parseProviderEntry(
   id: string,
   raw: unknown,
   warnings: string[],
   home: string,
+  env: Record<string, string | undefined> = process.env,
 ): GatewayConfig | undefined {
   const where = `providers.${id}`;
   if (!PROVIDER_ID_RE.test(id)) {
@@ -477,16 +483,41 @@ export function parseProviderEntry(
     warnings.push(`${where}: literal "password" is not supported; use "passwordEnv" or "passwordFile"; skipped`);
     return undefined;
   }
-  if (typeof raw.baseUrl !== "string") {
-    warnings.push(`${where}: "baseUrl" is required; skipped`);
+  if (raw.baseUrl !== undefined && raw.baseUrlEnv !== undefined) {
+    warnings.push(`${where}: set either "baseUrl" or "baseUrlEnv", not both; skipped`);
     return undefined;
   }
   let baseUrl: string;
-  try {
-    baseUrl = normalizeBaseUrl(raw.baseUrl);
-  } catch (error) {
-    warnings.push(`${where}: ${error instanceof Error ? error.message : String(error)}; skipped`);
-    return undefined;
+  if (raw.baseUrlEnv !== undefined) {
+    if (typeof raw.baseUrlEnv !== "string" || !ENV_NAME_RE.test(raw.baseUrlEnv)) {
+      warnings.push(`${where}: "baseUrlEnv" must be an environment variable name; skipped`);
+      return undefined;
+    }
+    const value = env[raw.baseUrlEnv]?.trim();
+    if (!value) {
+      warnings.push(`${where}: "baseUrlEnv" names ${raw.baseUrlEnv}, which is unset or empty; skipped`);
+      return undefined;
+    }
+    try {
+      baseUrl = normalizeBaseUrl(value);
+    } catch {
+      // Never echo the value: a mistyped baseUrlEnv may name a variable holding a credential.
+      warnings.push(
+        `${where}: "baseUrlEnv" names ${raw.baseUrlEnv}, which does not hold an http(s) base URL without credentials, query or fragment; skipped`,
+      );
+      return undefined;
+    }
+  } else {
+    if (typeof raw.baseUrl !== "string") {
+      warnings.push(`${where}: "baseUrl" or "baseUrlEnv" is required; skipped`);
+      return undefined;
+    }
+    try {
+      baseUrl = normalizeBaseUrl(raw.baseUrl);
+    } catch (error) {
+      warnings.push(`${where}: ${error instanceof Error ? error.message : String(error)}; skipped`);
+      return undefined;
+    }
   }
 
   const authHeaders = parseAuthHeaders(raw.authHeader, where, warnings);
@@ -567,7 +598,11 @@ export function parseProviderEntry(
 }
 
 /** Parse the whole config file (already JSON-decoded). */
-export function parseConfigFile(json: unknown, home: string): ParseResult {
+export function parseConfigFile(
+  json: unknown,
+  home: string,
+  env: Record<string, string | undefined> = process.env,
+): ParseResult {
   const warnings: string[] = [];
   const providers: GatewayConfig[] = [];
   if (!isRecord(json) || !isRecord(json.providers)) {
@@ -575,10 +610,56 @@ export function parseConfigFile(json: unknown, home: string): ParseResult {
     return { providers, warnings };
   }
   for (const [id, raw] of Object.entries(json.providers)) {
-    const parsed = parseProviderEntry(id, raw, warnings, home);
+    const parsed = parseProviderEntry(id, raw, warnings, home, env);
     if (parsed) providers.push(parsed);
   }
   return { providers, warnings };
+}
+
+function ownValue(record: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+/** Two objects merge one level deep (the overlay's keys win); anything else is replaced. */
+function mergeShallow(base: unknown, over: unknown): unknown {
+  return isRecord(base) && isRecord(over) ? { ...base, ...over } : over;
+}
+
+function mergeEach(
+  base: Record<string, unknown>,
+  over: Record<string, unknown>,
+  mergeOne: (base: unknown, over: unknown) => unknown,
+): Record<string, unknown> {
+  return { ...base, ...Object.fromEntries(Object.entries(over).map(([key, value]) => [key, mergeOne(ownValue(base, key), value)])) };
+}
+
+function mergeModelEntry(base: unknown, over: unknown): unknown {
+  return isRecord(base) && isRecord(over) ? mergeEach(base, over, mergeShallow) : over;
+}
+
+const BASE_URL_KEYS: readonly string[] = ["baseUrl", "baseUrlEnv"];
+
+function mergeProviderEntry(base: unknown, over: unknown): unknown {
+  if (!isRecord(base) || !isRecord(over)) return over;
+  // baseUrl and baseUrlEnv are one setting: the overlay naming either replaces both.
+  const replacesBaseUrl = BASE_URL_KEYS.some((key) => Object.hasOwn(over, key));
+  const kept = Object.entries(base).filter(([key]) => !(replacesBaseUrl && BASE_URL_KEYS.includes(key)));
+  const merged = Object.entries(over).map(([key, value]): [string, unknown] => {
+    const prior = ownValue(base, key);
+    if (key === "models" && isRecord(prior) && isRecord(value)) return [key, mergeEach(prior, value, mergeModelEntry)];
+    return [key, mergeShallow(prior, value)];
+  });
+  return { ...Object.fromEntries(kept), ...Object.fromEntries(merged) };
+}
+
+/**
+ * Merge the local overlay's `providers` over the shared file's, before either is parsed: per
+ * provider, then per model id. A key set to an object in both (`headers`, `authHeader`, a model's
+ * `compat`, `thinkingLevelMap` or `cost`) is merged one level deep; any other overlay value
+ * replaces the shared one. `baseUrl` and `baseUrlEnv` count as one key.
+ */
+export function mergeConfigOverlay(shared: Record<string, unknown>, overlay: Record<string, unknown>): Record<string, unknown> {
+  return mergeEach(shared, overlay, mergeProviderEntry);
 }
 
 /**
@@ -726,6 +807,34 @@ async function readTextIfExists(path: string): Promise<string | undefined> {
   }
 }
 
+/** A config file's `providers` object; undefined (with a warning naming the file unless it is missing). */
+async function readProviders(
+  path: string,
+  readText: (path: string) => Promise<string | undefined>,
+  warnings: string[],
+): Promise<Record<string, unknown> | undefined> {
+  let text: string | undefined;
+  try {
+    text = await readText(path);
+  } catch (error) {
+    warnings.push(`${path}: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+  if (text === undefined) return undefined;
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch (error) {
+    warnings.push(`${path}: invalid JSON (${error instanceof Error ? error.message : String(error)})`);
+    return undefined;
+  }
+  if (!isRecord(json) || !isRecord(json.providers)) {
+    warnings.push(`${path}: expected an object with a "providers" object`);
+    return undefined;
+  }
+  return json.providers;
+}
+
 /**
  * Everything the extension needs to decide what to register. No providers and no warnings means
  * "not configured": the extension stays silent.
@@ -734,27 +843,23 @@ export async function loadConfig(deps: LoadConfigDeps = {}): Promise<ParseResult
   const env = deps.env ?? process.env;
   const home = deps.home ?? homedir();
   const readText = deps.readText ?? readTextIfExists;
-  const path = join(agentDir(env, home), CONFIG_FILE_NAME);
+  const dir = agentDir(env, home);
+  const path = join(dir, CONFIG_FILE_NAME);
+  const localPath = join(dir, LOCAL_CONFIG_FILE_NAME);
 
   const fromEnv = envProvider(env, home);
-  let fromFile: ParseResult = { providers: [], warnings: [] };
-  let text: string | undefined;
-  try {
-    text = await readText(path);
-  } catch (error) {
-    fromFile.warnings.push(`${path}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (text !== undefined) {
-    let json: unknown;
-    try {
-      json = JSON.parse(text);
-    } catch (error) {
-      fromFile.warnings.push(`${path}: invalid JSON (${error instanceof Error ? error.message : String(error)})`);
-    }
-    if (json !== undefined) {
-      const parsed = parseConfigFile(json, home);
-      fromFile = { providers: parsed.providers, warnings: parsed.warnings.map((warning) => `${path}: ${warning}`) };
-    }
+  const fromFile: ParseResult = { providers: [], warnings: [] };
+  const shared = await readProviders(path, readText, fromFile.warnings);
+  const local = await readProviders(localPath, readText, fromFile.warnings);
+  for (const [id, raw] of Object.entries(mergeConfigOverlay(shared ?? {}, local ?? {}))) {
+    // A warning names every file the (merged) entry came from.
+    const where = [shared && Object.hasOwn(shared, id) ? path : "", local && Object.hasOwn(local, id) ? localPath : ""]
+      .filter(Boolean)
+      .join(" + ");
+    const warnings: string[] = [];
+    const parsed = parseProviderEntry(id, raw, warnings, home, env);
+    if (parsed) fromFile.providers.push(parsed);
+    fromFile.warnings.push(...warnings.map((warning) => `${where}: ${warning}`));
   }
   const mergeWarnings: string[] = [];
   const merged = mergeProviders(fromEnv.providers, fromFile.providers, { envDefaultApiSet: fromEnv.defaultApiSet, warnings: mergeWarnings });

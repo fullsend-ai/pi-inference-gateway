@@ -24,6 +24,12 @@ flag to `false` in `models["<id>"].compat`, or drop them all with `"compat": nul
 names an `INFERENCE_GATEWAY_*` credential but points at a different URL than
 `INFERENCE_GATEWAY_BASE_URL`. Give it a variable of its own, or fix the URL (see [Security](security.md)).
 
+**`providers.<id>: "baseUrlEnv" names <VAR>, which is unset or empty; skipped`.** The provider takes
+its base URL from that variable (see [Sharing the config file](configuration.md#sharing-the-config-file)).
+Export it in the shell that starts pi, or set a literal `baseUrl` for this provider in
+`inference-gateway.local.json`. When the variable is set but invalid, the warning says so without
+printing its value.
+
 **401 on every request with Basic auth.** Check `INFERENCE_GATEWAY_AUTH_HEADER=basic` (or the
 per-target `authHeader`), the password variable or file, and the username (default `gateway`).
 
