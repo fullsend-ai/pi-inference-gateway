@@ -251,6 +251,31 @@ describe("parseConfigFile", () => {
   });
 });
 
+describe("compat override parsing", () => {
+  it("accepts primitive flags, null, and warns on the rest", () => {
+    const { providers, warnings } = parseConfigFile(
+      {
+        providers: {
+          gw: {
+            baseUrl: "https://gw.example.com",
+            models: {
+              a: { compat: { supportsStore: false, maxTokensField: "max_tokens", n: 2, bad: { x: 1 }, "bad key": true } },
+              b: { compat: null },
+              c: { compat: "no" },
+            },
+          },
+        },
+      },
+      HOME,
+    );
+    const { models } = providers[0];
+    assert.deepEqual(models.a.compat, { supportsStore: false, maxTokensField: "max_tokens", n: 2 });
+    assert.equal(models.b.compat, null);
+    assert.equal("compat" in models.c, false);
+    assert.equal(warnings.length, 3);
+  });
+});
+
 describe("auth header overrides", () => {
   it("native defaults: x-api-key for Messages, Bearer for the OpenAI transports and discovery", () => {
     const none = { authHeaders: {} };

@@ -72,7 +72,18 @@ export interface ModelOverride {
   reasoning?: boolean;
   input?: ("text" | "image")[];
   cost?: Partial<CostFields>;
+  /**
+   * pi `compat` flags for this model. An object is merged over whatever was copied from pi's
+   * catalog (set a flag to `false` to switch off a request feature the gateway rejects); `null`
+   * drops the copied compat entirely. Passed to pi as written: keys pi does not know are ignored.
+   */
+  compat?: CompatOverride | null;
 }
+
+/** JSON-primitive compat flags from the config file. */
+export type CompatOverride = Record<string, boolean | string | number>;
+
+const COMPAT_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 
 export interface CostFields {
   input: number;
@@ -237,6 +248,27 @@ function parseModelOverride(raw: unknown, where: string, warnings: string[]): Mo
       if (value !== undefined) cost[key] = value;
     }
     override.cost = cost;
+  }
+  if (raw.compat === null) {
+    override.compat = null;
+  } else if (raw.compat !== undefined) {
+    if (isRecord(raw.compat)) {
+      const flags: Array<[string, boolean | string | number]> = [];
+      for (const [key, value] of Object.entries(raw.compat)) {
+        const primitive =
+          typeof value === "boolean" ||
+          (typeof value === "string" && value.length <= 256 && !hasControlChars(value)) ||
+          (typeof value === "number" && Number.isFinite(value));
+        if (!COMPAT_KEY_RE.test(key) || !primitive) {
+          warnings.push(`${where}: compat.${key.slice(0, 64)} must be a flag name with a boolean, string or number value; ignored`);
+          continue;
+        }
+        flags.push([key, value]);
+      }
+      override.compat = Object.fromEntries(flags);
+    } else {
+      warnings.push(`${where}: "compat" must be an object of flags, or null to drop pi's catalog compat; ignored`);
+    }
   }
   return override;
 }

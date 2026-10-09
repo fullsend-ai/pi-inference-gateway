@@ -108,7 +108,7 @@ For several gateways, per-model overrides or models the gateway does not list, a
 | `headers` | Extra headers on every request, discovery included. |
 | `modelsPath` | Model-list path, default `/v1/models`. |
 | `include` / `exclude` | `*` globs over listed model ids. |
-| `models` | Per-id overrides: `api`, `name`, `contextWindow`, `maxTokens`, `reasoning`, `input` (`["text","image"]`), `cost` (USD per million tokens). **An entry with an `api` whose id the gateway does not list adds that model.** |
+| `models` | Per-id overrides: `api`, `name`, `contextWindow`, `maxTokens`, `reasoning`, `input` (`["text","image"]`), `cost` (USD per million tokens), `compat` (see [Request features (`compat`)](#request-features-compat)). **An entry with an `api` whose id the gateway does not list adds that model.** |
 | `fallbackModels` | Offered when discovery fails: ids or `{ "id": ..., "owned_by": ... }` objects. |
 
 When `INFERENCE_GATEWAY_BASE_URL` is also set, it configures the provider with the same id
@@ -183,6 +183,27 @@ $ pi --no-session -p --model gateway/oss/zai-org/glm-5-3 "say hi"     # "api": "
 hi from /v1/chat/completions as oss/zai-org/glm-5-3
 ```
 
+## Request features (`compat`)
+
+When a model is in pi's built-in catalog on the same transport, it inherits pi's `compat` flags for
+it: which optional request features pi uses (strict tools, extra tool kinds, a vendor's thinking
+format, ...). Those flags describe the vendor's own API. A gateway that translates the request
+for another backend may reject some of them with a 400 naming an unknown field. Switch them off per
+model:
+
+```json
+"models": {
+  "gpt-6-luna": { "api": "openai-responses", "compat": { "supportsToolSearch": false } },
+  "oss/zai-org/glm-5-3": { "api": "openai-completions", "compat": null }
+}
+```
+
+An object is merged over the inherited flags (set a flag to `false` to turn a feature off); `null`
+drops the inherited flags entirely, so pi falls back to its plain defaults for that transport.
+Values must be booleans, strings or numbers; pi ignores flag names it does not know. pi's
+`allowedFallbackModels` is never inherited: it adds a `fallbacks` body field that only
+api.anthropic.com accepts.
+
 ## When the model list changes
 
 `pi -p` and `pi --list-models` never refresh model lists from the network, so the extension asks the
@@ -211,6 +232,16 @@ lists a Claude and a Gemini model, accepts only `x-api-key` on `/v1/messages`, a
 - A gateway exposing an OpenAI-style model list and at least one of `/v1/messages`,
   `/v1/responses`, `/v1/chat/completions`
 
+## Known limitations
+
+- **Gemini tool calls over `/v1/chat/completions` may fail after the first turn.** Gemini attaches a
+  `thought_signature` to each tool call (`message.extra_content.google.thought_signature` on an
+  OpenAI-compatible endpoint) and expects it back on the next request. pi's chat-completions
+  transport (pi-ai 0.99.2 through 1.1.0) neither reads nor replays that field, so a gateway that
+  passes it through can reject the follow-up turn. Single-turn prompts and text replies work.
+- **Inherited `compat` flags may not suit your gateway** — see
+  [Request features (`compat`)](#request-features-compat).
+
 ## Troubleshooting
 
 **No `gateway` rows and no message.** Either nothing is configured (the extension is silent by
@@ -225,6 +256,10 @@ key. Add `fallbackModels` or config-added models to keep working while the gatew
 **401 on Claude models only.** Your gateway wants Bearer on `/v1/messages`: set
 `"authHeader": { "anthropic-messages": "authorization" }`. A 401 on everything else but Claude is
 the reverse: `"openai-responses": "x-api-key"` and so on.
+
+**A 400 naming a request field** (`tools.0.defer_loading`, `tool_stream`, `thinking`, ...). An
+inherited pi `compat` flag turned on a feature your gateway or its backend does not accept. Set that
+flag to `false` in `models["<id>"].compat`, or drop them all with `"compat": null`.
 
 **404 on a model that is listed.** The gateway serves it on a different path than the one picked.
 Set `models["<id>"].api` to the right transport.

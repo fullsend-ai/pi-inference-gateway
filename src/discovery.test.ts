@@ -585,6 +585,53 @@ describe("buildModel metadata precedence", () => {
   });
 });
 
+describe("compat overrides", () => {
+  const withCompat = getBuiltinModels("openai").find((model) => model.compat && Object.keys(model.compat).length > 1);
+  assert.ok(withCompat, "pi's openai catalog no longer has a model with several compat flags");
+  const [firstKey] = Object.keys(withCompat.compat ?? {});
+
+  it("merges an override over the copied catalog compat", () => {
+    const entry = parseModelEntry({ id: withCompat.id });
+    assert.ok(entry);
+    const model = buildModel(entry, config({ models: { [withCompat.id]: { compat: { [firstKey]: false, extraFlag: "x" } } } }));
+    assert.deepEqual(model.compat, { ...withCompat.compat, [firstKey]: false, extraFlag: "x" });
+  });
+
+  it("null drops the catalog compat entirely", () => {
+    const entry = parseModelEntry({ id: withCompat.id });
+    assert.ok(entry);
+    const model = buildModel(entry, config({ models: { [withCompat.id]: { compat: null } } }));
+    assert.equal(model.compat, undefined);
+    assert.ok(model.thinkingLevelMap === withCompat.thinkingLevelMap, "only compat is dropped");
+  });
+
+  it("applies to a model with no catalog compat", () => {
+    const entry = parseModelEntry({ id: "unknown-model-c" });
+    assert.ok(entry);
+    assert.deepEqual(buildModel(entry, config({ models: { "unknown-model-c": { compat: { supportsStore: false } } } })).compat, {
+      supportsStore: false,
+    });
+  });
+
+  it("never brings back allowedFallbackModels through a merge", () => {
+    const source = getBuiltinModels("anthropic").find((model) => (model.compat?.allowedFallbackModels?.length ?? 0) > 0);
+    if (!source) return;
+    const entry = parseModelEntry({ id: source.id });
+    assert.ok(entry);
+    const model = buildModel(entry, config({ models: { [source.id]: { compat: { supportsTemperature: true } } } }));
+    assert.ok(model.compat);
+    assert.equal("allowedFallbackModels" in model.compat, false);
+  });
+
+  it("does not leak one model's override into the shared catalog entry", () => {
+    const entry = parseModelEntry({ id: withCompat.id });
+    assert.ok(entry);
+    buildModel(entry, config({ models: { [withCompat.id]: { compat: { [firstKey]: "mutated" } } } }));
+    const pristine = getBuiltinModels("openai").find((model) => model.id === withCompat.id)?.compat ?? {};
+    assert.notEqual(Object.entries(pristine).find(([key]) => key === firstKey)?.[1], "mutated");
+  });
+});
+
 describe("include / exclude", () => {
   it("matches * globs", () => {
     assert.equal(globMatch("claude-*", "claude-sonnet-5"), true);
