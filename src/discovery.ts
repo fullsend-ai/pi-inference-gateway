@@ -100,6 +100,68 @@ async function readLimited(response: Response, limit: number): Promise<string> {
   return new TextDecoder().decode(bytes);
 }
 
+const ERROR_DETAIL_BYTES = 512;
+const ERROR_DETAIL_CHARS = 200;
+
+/**
+ * Every string a credential in `headers` could appear as in an error body: each header value, each
+ * of its space-separated parts (`Bearer <token>` → `<token>`), and for Basic the decoded
+ * `user:password` and the password alone. Only the scheme words and fragments under 3 characters
+ * are left alone.
+ */
+function secretsIn(headers: Record<string, string>): string[] {
+  const secrets = new Set<string>();
+  for (const value of Object.values(headers)) {
+    const parts = value.split(/\s+/);
+    for (const part of [value, ...parts]) secrets.add(part);
+    if (parts[0]?.toLowerCase() === "basic" && parts[1]) {
+      const decoded = Buffer.from(parts[1], "base64").toString("utf8");
+      secrets.add(decoded);
+      secrets.add(decoded.slice(decoded.indexOf(":") + 1));
+    }
+  }
+  return [...secrets]
+    .filter((secret) => secret.length >= 3 && !/^(bearer|basic)$/i.test(secret))
+    .sort((a, b) => b.length - a.length);
+}
+
+/**
+ * The start of a `text/plain` error body, for the error message: at most ERROR_DETAIL_BYTES read,
+ * control characters flattened, ERROR_DETAIL_CHARS shown, credentials from the request redacted.
+ * JSON, HTML and anything else is not echoed. Never throws.
+ */
+async function plainTextDetail(response: Response, headers: Record<string, string>): Promise<string> {
+  const type = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!type.startsWith("text/plain") || !response.body) {
+    await response.body?.cancel().catch(() => {});
+    return "";
+  }
+  let text = "";
+  try {
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (total < ERROR_DETAIL_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.byteLength;
+    }
+    await reader.cancel().catch(() => {});
+    text = new TextDecoder().decode(Buffer.concat(chunks).subarray(0, ERROR_DETAIL_BYTES));
+  } catch {
+    return "";
+  }
+  // Whole occurrences only (not inside a longer alphanumeric run), so a 3-letter token does not
+  // mangle every word that contains it; a secret glued to `=`, `:`, quotes or spaces is caught.
+  for (const secret of secretsIn(headers)) {
+    const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    text = text.replace(new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9])`, "g"), "[redacted]");
+  }
+  const flat = text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").replace(/\s+/g, " ").trim();
+  return flat.length > ERROR_DETAIL_CHARS ? `${flat.slice(0, ERROR_DETAIL_CHARS)}…` : flat;
+}
+
 /**
  * GET the model list. Redirects are an error (a gateway that redirects its model list is
  * misconfigured, and following one would send the token to another origin), the body is capped,
@@ -122,10 +184,11 @@ export async function fetchModelList(options: FetchModelListOptions): Promise<un
     throw new Error(`model list request failed: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (response.status < 200 || response.status >= 300) {
-    await response.body?.cancel();
     // Covers `redirect: "manual"` style opaque redirects from fetch implementations that do not
-    // throw, and every gateway error. The body is not echoed: it may contain the request back.
-    throw new Error(`model list request returned HTTP ${response.status}`);
+    // throw, and every gateway error. Only a short text/plain body is shown (gateways answer auth
+    // and conversion failures that way), with every credential the request carried redacted.
+    const detail = await plainTextDetail(response, options.headers);
+    throw new Error(`model list request returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
   }
   let text: string;
   try {

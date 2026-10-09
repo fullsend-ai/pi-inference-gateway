@@ -10,7 +10,7 @@ import { createProvider, normalizeContext } from "@earendil-works/pi-ai";
 import type { Context, FetchFunction } from "@earendil-works/pi-ai";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { parseConfigFile, type GatewayConfig } from "./config.ts";
-import { buildModel, extraModels, findCatalogModel, modelsFromList, parseModelEntry, parseModelList } from "./discovery.ts";
+import { buildModel, discoverModels, extraModels, findCatalogModel, modelsFromList, parseModelEntry, parseModelList } from "./discovery.ts";
 import { createGatewayProvider, gatewayProviderOptions, initialModels, onceWarn } from "./provider.ts";
 import { sseFor } from "./test-fixtures.ts";
 
@@ -135,6 +135,74 @@ describe("D6 (config-driven): models[id].thinkingLevelMap decides what reasoning
       bodies.map((body) => body.reasoning_effort),
       ["high", "none"],
     );
+  });
+});
+
+describe("D5: text/plain error bodies are shown, never a credential", () => {
+  const text = (status: number, body: string, type = "text/plain") =>
+    (async () => new Response(body, { status, headers: { "content-type": type } })) satisfies FetchFunction;
+
+  it("discovery errors carry a text/plain body", async () => {
+    await assert.rejects(
+      discoverModels(config(), { token: "tok", fetch: text(401, "authentication failure: no bearer token found") }),
+      { message: "model list request returned HTTP 401: authentication failure: no bearer token found" },
+    );
+  });
+
+  it("redacts even a short token", async () => {
+    await assert.rejects(discoverModels(config(), { token: "k9z", fetch: text(401, "token k9z rejected, key=k9z") }), {
+      message: "model list request returned HTTP 401: token [redacted] rejected, key=[redacted]",
+    });
+  });
+
+  it("redacts every credential the request carried, in any form", async () => {
+    const token = "s3cr3t-token-value"; // gitleaks:allow (test fixture)
+    await assert.rejects(discoverModels(config(), { token, fetch: text(401, `bad token Bearer ${token} for you`) }), (error: Error) => {
+      assert.doesNotMatch(error.message, /s3cr3t/);
+      assert.match(error.message, /bad token \[redacted\] for you/);
+      return true;
+    });
+    const basic = { username: "gateway", password: "pa55word-xyz" }; // gitleaks:allow (test fixture)
+    const encoded = Buffer.from("gateway:pa55word-xyz").toString("base64");
+    const cfg = config({ authHeaders: { discovery: "basic" } });
+    await assert.rejects(
+      discoverModels(cfg, { credentials: { basic, problems: [] }, fetch: text(403, `got ${encoded} / gateway:pa55word-xyz / pa55word-xyz`) }),
+      (error: Error) => {
+        assert.doesNotMatch(error.message, /pa55word|Z2F0ZXdheTpw/);
+        return true;
+      },
+    );
+  });
+
+  it("truncates long bodies and strips control characters", async () => {
+    await assert.rejects(discoverModels(config(), { token: "tok", fetch: text(500, `a\u0007b${"x".repeat(5000)}`) }), (error: Error) => {
+      assert.ok(error.message.length < 400, String(error.message.length));
+      assert.match(error.message, /HTTP 500: a bx+…$/);
+      return true;
+    });
+  });
+
+  it("does not echo JSON or HTML bodies", async () => {
+    await assert.rejects(discoverModels(config(), { token: "tok", fetch: text(404, `{"error":"x"}`, "application/json") }), {
+      message: "model list request returned HTTP 404",
+    });
+    await assert.rejects(discoverModels(config(), { token: "tok", fetch: text(502, "<html>bad</html>", "text/html") }), {
+      message: "model list request returned HTTP 502",
+    });
+  });
+
+  it("inference errors: pi's own transport already reports the text/plain body", async () => {
+    const message = "failed to process LLM request: unsupported conversion: from Responses to provider anthropic (supported: [AnthropicMessages])";
+    const cfg = config();
+    const model = buildModel({ id: "claude-sonnet-5", api: "openai-responses", endpoints: [], owners: [] }, cfg);
+    const provider = createProvider(gatewayProviderOptions(cfg, [model], { env: { GW_KEY: "tok" } }));
+    const context = normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 0 }] } satisfies Context);
+    let error = "";
+    for await (const event of provider.streamSimple(model, context, { apiKey: "tok", fetch: text(400, message), maxRetries: 0 })) {
+      if (event.type === "error") error = event.error.errorMessage ?? "";
+    }
+    assert.match(error, /400/);
+    assert.ok(error.includes("unsupported conversion: from Responses to provider anthropic"), error);
   });
 });
 

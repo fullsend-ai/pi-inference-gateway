@@ -254,12 +254,11 @@ describe("fetchModelList", () => {
     await assert.rejects(fetchModelList({ url: "https://gw.example.com/v1/models", headers: {}, fetch: returned.fetch }), /HTTP 302/);
   });
 
-  it("rejects non-2xx responses without echoing the body", async () => {
-    const { fetch } = stubFetch(() => new Response("secret-ish detail", { status: 401 }));
-    await assert.rejects(
-      fetchModelList({ url: "https://gw.example.com/v1/models", headers: {}, fetch }),
-      (error: Error) => /HTTP 401/.test(error.message) && !error.message.includes("secret-ish"),
-    );
+  it("rejects non-2xx responses; a text/plain body is shown with the request's credentials redacted", async () => {
+    const { fetch } = stubFetch(() => new Response("denied for x-key-123456 here", { status: 401 }));
+    await assert.rejects(fetchModelList({ url: "https://gw.example.com/v1/models", headers: { "x-api-key": "x-key-123456" }, fetch }), {
+      message: "model list request returned HTTP 401: denied for [redacted] here",
+    });
   });
 
   it("rejects a body declared over the size limit", async () => {
