@@ -231,6 +231,58 @@ describe("lesson 5: persisted snapshots are version-stamped", () => {
     );
   });
 
+  it("an unstamped model with no identifying signal keeps its saved api (not defaultApi)", async () => {
+    const provider = createGatewayProvider(config({ defaultApi: "openai-responses" }), { models: [], fresh: false }, { env: ENV });
+    assert.ok(provider.refreshModels);
+    await provider.refreshModels(refreshContext({ stored: { models: [stale("custom-chat", "openai-completions")] } }).context);
+    assert.deepEqual(
+      provider.getModels().map((model) => [model.id, model.api]),
+      [["custom-chat", "openai-completions"]],
+    );
+  });
+
+  it("persists each model's routing hints, so a later re-derivation uses the gateway's owner and endpoints", async () => {
+    const store = new InMemoryModelsStore();
+    const { fetch } = listFetch({
+      data: [
+        { id: "custom-x", owned_by: "anthropic" },
+        { id: "custom-y", supported_endpoints: ["/v1/chat/completions"] },
+      ],
+    });
+    const models = createModels({ modelsStore: store });
+    models.setProvider(createGatewayProvider(config(), { models: [], fresh: false }, { env: ENV, fetch }));
+    assert.equal((await models.refresh({ allowNetwork: true })).errors.size, 0);
+    const saved = await store.read("gateway");
+    assert.ok(saved);
+    // A snapshot from before a rules change: no stamp, and wrong apis saved.
+    const tampered = saved.models.map((model) => (model.provider === "gateway" ? { ...model, api: "openai-responses" } : model));
+    const later = createGatewayProvider(config({ defaultApi: "openai-responses" }), { models: [], fresh: false }, { env: ENV });
+    assert.ok(later.refreshModels);
+    await later.refreshModels(refreshContext({ stored: { models: tampered } }).context);
+    assert.deepEqual(
+      later.getModels().map((model) => [model.id, model.api]),
+      [
+        ["custom-x", "anthropic-messages"],
+        ["custom-y", "openai-completions"],
+      ],
+    );
+  });
+
+  it("a current stamp keeps the saved api after a defaultApi change; a per-model api override always wins", async () => {
+    const stored = { models: [stale("kept", "openai-responses"), stale("forced", "openai-responses")], etag: SNAPSHOT_STAMP };
+    const cfg = config({ defaultApi: "openai-completions", models: { forced: { api: "anthropic-messages" } } });
+    const provider = createGatewayProvider(cfg, { models: [], fresh: false }, { env: ENV });
+    assert.ok(provider.refreshModels);
+    await provider.refreshModels(refreshContext({ stored }).context);
+    assert.deepEqual(
+      provider.getModels().map((model) => [model.id, model.api]),
+      [
+        ["kept", "openai-responses"],
+        ["forced", "anthropic-messages"],
+      ],
+    );
+  });
+
   it("a network refresh persists the stamp, and pi's real store hands it back", async () => {
     const store = new InMemoryModelsStore();
     const { fetch } = listFetch({ data: [{ id: "a" }] });

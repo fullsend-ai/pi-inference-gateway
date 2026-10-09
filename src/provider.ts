@@ -31,7 +31,7 @@ import {
   type GatewayCredentials,
   type LoadConfigDeps,
 } from "./config.ts";
-import { discoverModels, fallbackModels, rebindModels, type GatewayModel } from "./discovery.ts";
+import { discoverModels, fallbackModels, rebindModels, ROUTING_HINTS_KEY, type GatewayModel, type RoutingHints } from "./discovery.ts";
 
 export const LOG_PREFIX = "[pi-inference-gateway]";
 
@@ -334,18 +334,25 @@ export function createGatewayProvider(
       if (!published) return;
     }
     if (!context.allowNetwork || context.signal.aborted) return;
+    const hints = new Map<string, RoutingHints>();
     const fetched = await discoverModels(config, {
       credentials: await discoveryCredentials(config, deps),
       signal: context.signal,
       warn: providerWarn(config, deps),
+      hints,
       ...(deps.fetch ? { fetch: deps.fetch } : {}),
     });
     if (context.signal.aborted) return;
     await context.publish({
       // Static headers are config, not catalog: they stay out of pi's models-store file and are
-      // rebuilt from the current config on restore (rebindModels).
+      // rebuilt from the current config on restore (rebindModels). The gateway's routing hints go
+      // in, so a later rules change re-derives each api from what the gateway said.
       persist: {
-        models: fetched.map((model) => ({ ...model, headers: undefined })),
+        models: fetched.map((model) => ({
+          ...model,
+          headers: undefined,
+          ...(hints.has(model.id) ? { [ROUTING_HINTS_KEY]: hints.get(model.id) } : {}),
+        })),
         checkedAt: Date.now(),
         etag: SNAPSHOT_STAMP,
       },

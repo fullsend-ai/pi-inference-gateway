@@ -272,7 +272,10 @@ and the list pi saved from its last interactive refresh.
 - **Context windows:** `maxTokens` never exceeds `contextWindow`. A gateway window 4x or more off
   pi's catalog for the same model is used, with one warning: relays sometimes report a placeholder.
 - **Saved lists are stamped**, so a model restored from a list saved by an older version of this
-  extension has its API re-chosen by the current rules.
+  extension has its API re-chosen by the current rules, from the gateway's owner and endpoint hints
+  saved with it. A model nothing identifies keeps the API it was saved with. With a current stamp,
+  a restored model keeps its saved API even after you change `defaultApi`, until the next successful
+  discovery; a per-model `models[id].api` always wins.
 
 ## Session affinity
 

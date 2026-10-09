@@ -604,6 +604,15 @@ export function selectApi(
   config: Pick<GatewayConfig, "models" | "defaultApi">,
   match: CatalogMatch | undefined = findCatalogModel(entry.id),
 ): GatewayApi {
+  return identifiedApi(entry, config, match) ?? config.defaultApi;
+}
+
+/** selectApi's rules 1–6: the transport something identifies, or undefined (then `defaultApi`). */
+export function identifiedApi(
+  entry: GatewayModelEntry,
+  config: Pick<GatewayConfig, "models">,
+  match: CatalogMatch | undefined = findCatalogModel(entry.id),
+): GatewayApi | undefined {
   const override = modelOverride(config, entry.id)?.api;
   if (override) return override;
 
@@ -621,7 +630,7 @@ export function selectApi(
 
   if (match) return "openai-completions";
 
-  return config.defaultApi;
+  return undefined;
 }
 
 /**
@@ -857,6 +866,8 @@ export interface DiscoverOptions {
   timeoutMs?: number;
   /** Receives each non-fatal finding about the list (wildcard ids, ...), unprefixed. */
   warn?: (message: string) => void;
+  /** Filled with each listed model's routing hints (owners, endpoints), for persisting. */
+  hints?: Map<string, RoutingHints>;
 }
 
 /**
@@ -876,28 +887,56 @@ export async function discoverModels(config: GatewayConfig, options: DiscoverOpt
   });
   const parsed = parseModelList(body);
   const built = buildFromParsed(parsed, config);
+  for (const entry of parsed.entries) options.hints?.set(entry.id, routingHints(entry));
   for (const warning of built.warnings) options.warn?.(warning);
   assertUsable(parsed);
   return built.models;
 }
 
+/** The gateway's routing hints for one model, persisted with it so a later re-derivation is faithful. */
+export interface RoutingHints {
+  owners: string[];
+  endpoints: string[];
+}
+
+/** Property name of the hints on a persisted model. */
+export const ROUTING_HINTS_KEY = "gatewayRoutingHints";
+
+export function routingHints(entry: Pick<GatewayModelEntry, "owners" | "endpoints">): RoutingHints {
+  return { owners: [...entry.owners], endpoints: [...entry.endpoints] };
+}
+
+/** Hints read back from a persisted model, sanitised like the wire (they came from the gateway). */
+function storedHints(model: object): RoutingHints {
+  const raw: unknown = Reflect.get(model, ROUTING_HINTS_KEY);
+  if (!isRecord(raw)) return { owners: [], endpoints: [] };
+  const clean = (value: unknown, max: number) =>
+    stringArray(value)
+      .slice(0, 16)
+      .map((item) => cleanString(item, max))
+      .filter((item): item is string => item !== undefined);
+  return { owners: clean(raw.owners, 128).map((owner) => owner.toLowerCase()), endpoints: clean(raw.endpoints, 256) };
+}
+
 /**
- * A cached pi model as if the gateway had described it: its metadata become hints, and so does its
- * transport when `keepApi` (the snapshot was saved by the current selection rules).
+ * A cached pi model as if the gateway had described it: its metadata and persisted routing hints
+ * become hints. Its saved transport is kept when `keepApi` (the snapshot was saved by the current
+ * selection rules), and also when re-deriving finds nothing that identifies the model — a model
+ * that only the old `defaultApi` (or a since-removed hint) placed must not move.
  */
-function entryFromModel(model: Model<GatewayApi>, keepApi: boolean): GatewayModelEntry {
-  return {
+function entryFromModel(model: Model<GatewayApi>, keepApi: boolean, config: Pick<GatewayConfig, "models">): GatewayModelEntry {
+  const entry: GatewayModelEntry = {
     id: model.id,
     name: model.name,
-    ...(keepApi ? { api: model.api } : {}),
-    endpoints: [],
-    owners: [],
+    ...storedHints(model),
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
     reasoning: model.reasoning,
     vision: model.input.includes("image"),
     cost: { input: model.cost.input, output: model.cost.output, cacheRead: model.cost.cacheRead, cacheWrite: model.cost.cacheWrite },
   };
+  if (keepApi || identifiedApi(entry, config) === undefined) entry.api = model.api;
+  return entry;
 }
 
 function asGatewayModel(model: AnyModel): Model<GatewayApi> | undefined {
@@ -931,7 +970,7 @@ export function rebindModels(
     const configured = modelOverride(config, model.id)?.api !== undefined;
     if (!configured && !isIncluded(model.id, config)) continue;
     seen.add(model.id);
-    rebound.push(buildModel(entryFromModel(model, keepApi), config));
+    rebound.push(buildModel(entryFromModel(model, keepApi, config), config));
   }
   return rebound;
 }
