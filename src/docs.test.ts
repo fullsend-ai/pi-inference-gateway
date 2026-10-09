@@ -44,22 +44,27 @@ function proseLines(markdown: string): string[] {
 
 /** Anchors GitHub generates for a file's headings, with -1, -2, ... for repeats. */
 export function anchors(markdown: string): Set<string> {
-  const seen = new Map<string, number>();
   const result = new Set<string>();
   for (const line of proseLines(markdown)) {
     const heading = /^ {0,3}#{1,6}\s+(.*?)(?:\s+#+)?\s*$/.exec(line)?.[1];
     if (heading === undefined) continue;
     const base = slug(heading);
-    const count = seen.get(base) ?? 0;
-    seen.set(base, count + 1);
-    result.add(count === 0 ? base : `${base}-${count}`);
+    let anchor = base;
+    for (let n = 1; result.has(anchor); n++) anchor = `${base}-${n}`;
+    result.add(anchor);
   }
   return result;
 }
 
 /** Inline link targets outside fenced blocks and code spans. */
 export function linkTargets(markdown: string): string[] {
-  const prose = proseLines(markdown).join("\n").replace(/`[^`]*`/g, "");
+  // A code span is a backtick run closed by a run of the same length, within one paragraph; an
+  // unmatched run is literal text and hides nothing.
+  const prose = proseLines(markdown)
+    .join("\n")
+    .split(/\n[ \t]*\n/)
+    .map((paragraph) => paragraph.replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, ""))
+    .join("\n\n");
   return [...prose.matchAll(/\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g)].map((m) => m[1] ?? "");
 }
 
@@ -104,6 +109,20 @@ describe("docs: GitHub-style heading anchors", () => {
   it("numbers repeated headings and ignores '#' lines inside fenced code", () => {
     const md = ["# Title", "## Usage", "```bash", "# not a heading", "```", "  ```", "## Inside an indented fence", "  ```", "## Usage"].join("\n");
     assert.deepEqual([...anchors(md)], ["title", "usage", "usage-1"]);
+  });
+
+  it("keeps every anchor unique when a repeated heading's suffix collides with a real heading", () => {
+    const md = ["# Usage", "# Usage", "# Usage-1", "# Usage"].join("\n");
+    assert.deepEqual([...anchors(md)], ["usage", "usage-1", "usage-1-1", "usage-2"]);
+  });
+
+  it("matches code spans by backtick-run length and ignores unmatched backticks", () => {
+    const doubled = "Example: ``[a](double.md) with ` inside`` and [real](real.md).";
+    assert.deepEqual(linkTargets(doubled), ["real.md"]);
+    const unmatched = ["A stray ` backtick.", "", "A [link](kept.md) in the next paragraph and `[code](hidden.md)`."].join("\n");
+    assert.deepEqual(linkTargets(unmatched), ["kept.md"]);
+    const sameParagraph = "A stray ` backtick before [link](kept.md).";
+    assert.deepEqual(linkTargets(sameParagraph), ["kept.md"]);
   });
 
   it("finds links outside code, including links whose text wraps a line", () => {
