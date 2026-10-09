@@ -596,6 +596,20 @@ describe("loadConfig", () => {
     assert.match(result.warnings[0], /invalid JSON/);
   });
 
+  it("does not echo any of a malformed file's content in the invalid-JSON warning", async () => {
+    const result = await loadConfig({
+      env: {},
+      home: HOME,
+      readText: async () => '{"providers": {"corp": {"apiKeyEnv": "CORP_KEY" oops',
+    });
+    // One warning per file: the shared file and the overlay.
+    assert.equal(result.warnings.length, 2);
+    for (const warning of result.warnings) {
+      assert.match(warning, /invalid JSON$/);
+      assert.equal(warning.includes("CORP_KEY"), false);
+    }
+  });
+
   it("warns when the file cannot be read", async () => {
     const result = await loadConfig({
       env: {},
@@ -625,6 +639,22 @@ describe("baseUrlEnv", () => {
       assert.deepEqual(providers, []);
       assert.equal(warnings.length, 1);
       assert.match(warnings[0], /providers\.corp: "baseUrlEnv" names CORP_URL, which is unset or empty; skipped/);
+    }
+  });
+
+  it("treats a name that only exists on the prototype as unset and still loads other providers", () => {
+    const config = {
+      providers: {
+        broken: { apiKeyEnv: "CORP_KEY", baseUrlEnv: "toString" },
+        good: { apiKeyEnv: "CORP_KEY", baseUrl: "https://gw.example.com" },
+      },
+    };
+    for (const baseUrlEnv of ["toString", "constructor"]) {
+      config.providers.broken.baseUrlEnv = baseUrlEnv;
+      const { providers, warnings } = parseConfigFile(config, HOME, {});
+      assert.deepEqual(providers.map((p) => p.id), ["good"], baseUrlEnv);
+      assert.equal(warnings.length, 1, baseUrlEnv);
+      assert.match(warnings[0], new RegExp(`"baseUrlEnv" names ${baseUrlEnv}, which is unset or empty; skipped`));
     }
   });
 

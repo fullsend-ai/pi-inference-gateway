@@ -493,7 +493,9 @@ export function parseProviderEntry(
       warnings.push(`${where}: "baseUrlEnv" must be an environment variable name; skipped`);
       return undefined;
     }
-    const value = env[raw.baseUrlEnv]?.trim();
+    // Own properties only: a name like "toString" would otherwise resolve to an inherited function.
+    const rawValue = Object.hasOwn(env, raw.baseUrlEnv) ? env[raw.baseUrlEnv] : undefined;
+    const value = typeof rawValue === "string" ? rawValue.trim() : undefined;
     if (!value) {
       warnings.push(`${where}: "baseUrlEnv" names ${raw.baseUrlEnv}, which is unset or empty; skipped`);
       return undefined;
@@ -824,8 +826,9 @@ async function readProviders(
   let json: unknown;
   try {
     json = JSON.parse(text);
-  } catch (error) {
-    warnings.push(`${path}: invalid JSON (${error instanceof Error ? error.message : String(error)})`);
+  } catch {
+    // Not the parser's message: recent V8 versions quote an excerpt of the input in it.
+    warnings.push(`${path}: invalid JSON`);
     return undefined;
   }
   if (!isRecord(json) || !isRecord(json.providers)) {
