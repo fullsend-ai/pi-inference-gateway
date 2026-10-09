@@ -5,7 +5,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -27,7 +27,7 @@ export function slug(heading: string): string {
 function proseLines(markdown: string): string[] {
   let fence: string | undefined;
   return markdown.split("\n").map((line) => {
-    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
     if (fence === undefined) {
       if (marker !== undefined) {
         fence = marker;
@@ -56,7 +56,7 @@ export function anchors(markdown: string): Set<string> {
   return result;
 }
 
-/** Inline link targets outside fenced blocks and code spans. */
+/** Inline and reference-definition link targets outside fenced blocks and code spans. */
 export function linkTargets(markdown: string): string[] {
   // A code span is a backtick run closed by a run of the same length, within one paragraph; an
   // unmatched run is literal text and hides nothing.
@@ -65,7 +65,9 @@ export function linkTargets(markdown: string): string[] {
     .split(/\n[ \t]*\n/)
     .map((paragraph) => paragraph.replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, ""))
     .join("\n\n");
-  return [...prose.matchAll(/\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g)].map((m) => m[1] ?? "");
+  const inline = [...prose.matchAll(/\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g)].map((m) => m[1] ?? "");
+  const definitions = [...prose.matchAll(/^ {0,3}\[[^\]]+\]:[ \t]*<?([^\s>]+)>?/gm)].map((m) => m[1] ?? "");
+  return [...inline, ...definitions];
 }
 
 function markdownFiles(): string[] {
@@ -81,14 +83,15 @@ function docsPages(): string[] {
 }
 
 /** Problems with one link from `file`, or undefined when it resolves. */
-function checkLink(file: string, target: string): string | undefined {
+export function checkLink(file: string, target: string): string | undefined {
   if (/^[a-z][a-z0-9+.-]*:/i.test(target)) return undefined; // http(s), mailto, ...
   const hash = target.indexOf("#");
   const path = hash === -1 ? target : target.slice(0, hash);
   const anchor = hash === -1 ? undefined : decodeURIComponent(target.slice(hash + 1));
   const resolved = path === "" ? file : resolve(dirname(file), decodeURIComponent(path));
   const where = `${relative(ROOT, file)}: ${target}`;
-  if (!resolved.startsWith(ROOT)) return `${where} (outside the repository)`;
+  const fromRoot = relative(ROOT, resolved);
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) return `${where} (outside the repository)`;
   if (!existsSync(resolved)) return `${where} (no such file)`;
   if (anchor === undefined || anchor === "") return undefined;
   if (!resolved.endsWith(".md")) return `${where} (anchor on a non-markdown file)`;
@@ -128,6 +131,23 @@ describe("docs: GitHub-style heading anchors", () => {
   it("finds links outside code, including links whose text wraps a line", () => {
     const md = ["See [a\nwrapped link](x.md#y) and `[code](not-a-link.md)`.", "```", "[fenced](no.md)", "```"].join("\n");
     assert.deepEqual(linkTargets(md), ["x.md#y"]);
+  });
+
+  it("finds reference-style link definitions, but not ones inside fenced code", () => {
+    const md = ["See [the guide][g].", "", "[g]: guide.md#intro", "  [h]: <other.md> \"Title\"", "", "```", "[x]: fenced.md", "```"].join("\n");
+    assert.deepEqual(linkTargets(md), ["guide.md#intro", "other.md"]);
+  });
+
+  it("treats only fences indented by at most three spaces as fences", () => {
+    const md = ["    ```", "A [link](kept.md) after a four-space-indented line.", "   ```", "[hidden](hidden.md)", "   ```", "## Heading"].join("\n");
+    assert.deepEqual(linkTargets(md), ["kept.md"]);
+    assert.deepEqual([...anchors(md)], ["heading"]);
+  });
+
+  it("flags a link into a sibling directory that merely shares the repository path as a prefix", () => {
+    const sibling = `../${basename(ROOT)}-private/x.md`;
+    assert.match(checkLink(README, sibling) ?? "", /outside the repository/);
+    assert.equal(checkLink(README, "docs"), undefined);
   });
 });
 
