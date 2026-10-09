@@ -2,7 +2,7 @@
 //
 // Configure with INFERENCE_GATEWAY_BASE_URL (+ INFERENCE_GATEWAY_API_KEY or
 // INFERENCE_GATEWAY_TOKEN_FILE), or ~/.pi/agent/inference-gateway.json. Unconfigured, it registers
-// nothing and prints nothing. See README.md and CONTRIBUTING.md.
+// nothing and prints nothing. See README.md, docs/configuration.md and CONTRIBUTING.md.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerGateways } from "./provider.ts";

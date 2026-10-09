@@ -316,7 +316,7 @@ Not implemented; in priority order:
 ## Generality audit (2026-10-09)
 
 Rule (AGENTS.md): no dependency-specific workarounds in code. A dependency problem is handled by
-config the user sets, a README troubleshooting entry, and an upstream issue. Every branch in `src/`
+config the user sets, a `docs/troubleshooting.md` entry, and an upstream issue. Every branch in `src/`
 keyed on a vendor, model id, owner or backend:
 
 | Branch | Where | Kind | Decision | Why |
@@ -356,6 +356,7 @@ keyed on a vendor, model id, owner or backend:
 
 ```
 package.json  tsconfig.json  .gitignore  LICENSE (MIT)  README.md  CONTRIBUTING.md  AGENTS.md  CLAUDE.md
+docs/              user reference, one topic per page (README.md is the landing page)
 src/config.ts      env + file parsing, validation
 src/discovery.ts   fetch /v1/models, parse + sanitise, metadata merge, API selection
 src/provider.ts    createProvider wiring, auth, refresh/publish, stream dispatch
