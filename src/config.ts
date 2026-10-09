@@ -749,11 +749,17 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
  * merged: the environment supplies the connection (base URL, credentials, default API) and the file
  * keeps everything else (headers, filters, fallback models). Auth-header overrides and models are
  * merged per key; for a model both name, the file's fields win over the env's bare `id=api`.
+ * `sources` maps a provider id to the file(s) its entry came from; a warning about that entry is
+ * prefixed with it.
  */
 export function mergeProviders(
   fromEnv: GatewayConfig[],
   fromFile: GatewayConfig[],
-  { envDefaultApiSet = false, warnings = [] }: { envDefaultApiSet?: boolean; warnings?: string[] } = {},
+  {
+    envDefaultApiSet = false,
+    warnings = [],
+    sources,
+  }: { envDefaultApiSet?: boolean; warnings?: string[]; sources?: ReadonlyMap<string, string> } = {},
 ): GatewayConfig[] {
   const merged = new Map<string, GatewayConfig>();
   for (const provider of fromFile) merged.set(provider.id, provider);
@@ -764,8 +770,9 @@ export function mergeProviders(
       continue;
     }
     if (file.baseUrl !== provider.baseUrl) {
+      const source = sources?.get(file.id);
       warnings.push(
-        `providers.${file.id}.baseUrl (${file.baseUrl}) is ignored: ${ENV.baseUrl} (${provider.baseUrl}) configures this provider; ` +
+        `${source ? `${source}: ` : ""}providers.${file.id}.baseUrl (${file.baseUrl}) is ignored: ${ENV.baseUrl} (${provider.baseUrl}) configures this provider; ` +
           `remove one of them, or give the file entry another id`,
       );
     }
@@ -852,6 +859,7 @@ export async function loadConfig(deps: LoadConfigDeps = {}): Promise<ParseResult
 
   const fromEnv = envProvider(env, home);
   const fromFile: ParseResult = { providers: [], warnings: [] };
+  const sources = new Map<string, string>();
   const shared = await readProviders(path, readText, fromFile.warnings);
   const local = await readProviders(localPath, readText, fromFile.warnings);
   for (const [id, raw] of Object.entries(mergeConfigOverlay(shared ?? {}, local ?? {}))) {
@@ -859,13 +867,18 @@ export async function loadConfig(deps: LoadConfigDeps = {}): Promise<ParseResult
     const where = [shared && Object.hasOwn(shared, id) ? path : "", local && Object.hasOwn(local, id) ? localPath : ""]
       .filter(Boolean)
       .join(" + ");
+    sources.set(id, where);
     const warnings: string[] = [];
     const parsed = parseProviderEntry(id, raw, warnings, home, env);
     if (parsed) fromFile.providers.push(parsed);
     fromFile.warnings.push(...warnings.map((warning) => `${where}: ${warning}`));
   }
   const mergeWarnings: string[] = [];
-  const merged = mergeProviders(fromEnv.providers, fromFile.providers, { envDefaultApiSet: fromEnv.defaultApiSet, warnings: mergeWarnings });
+  const merged = mergeProviders(fromEnv.providers, fromFile.providers, {
+    envDefaultApiSet: fromEnv.defaultApiSet,
+    warnings: mergeWarnings,
+    sources,
+  });
   const bound = bindEnvCredentials(merged, env);
   const cleaned = dropCredentialHeaders(bound.providers);
   return {
@@ -874,7 +887,7 @@ export async function loadConfig(deps: LoadConfigDeps = {}): Promise<ParseResult
     warnings: [
       ...fromEnv.warnings,
       ...fromFile.warnings,
-      ...mergeWarnings.map((warning) => `${path}: ${warning}`),
+      ...mergeWarnings,
       ...bound.warnings,
       ...cleaned.warnings,
     ],

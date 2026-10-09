@@ -78,7 +78,8 @@ everything machine-specific out of it:
   `$PI_CODING_AGENT_DIR`), is merged over the shared file per provider and per model. An overlay
   value replaces the shared one, except that two objects (`headers`, `authHeader`, a model's
   `compat`, `thinkingLevelMap` or `cost`) are merged key by key. Setting `baseUrl` or `baseUrlEnv`
-  in the overlay replaces both. A missing overlay is silent.
+  in the overlay replaces both. A missing overlay is silent; a malformed or unreadable one is
+  reported with its own path and then ignored, so the shared file applies alone.
 
 Shared file, safe to publish:
 
