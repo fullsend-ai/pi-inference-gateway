@@ -136,6 +136,10 @@ another gateway, use `baseUrlEnv` and `apiKeyEnv`. The same rules apply as for a
 `INFERENCE_GATEWAY_*` credentials still only go to `INFERENCE_GATEWAY_BASE_URL` (see
 [Security](security.md)), and warnings name the file they came from.
 
+Credential keys are merged one by one, like every other key. So a `tokenFile` or `passwordFile`
+in a shipped file carries over even when a user-level file sets another `baseUrl` with `apiKeyEnv`
+or `passwordEnv`, and `tokenFile` is read first. Leave file credentials out of a shipped config.
+
 ## Auth
 
 Each request carries exactly one auth header, chosen per target by an **auth scheme**:
