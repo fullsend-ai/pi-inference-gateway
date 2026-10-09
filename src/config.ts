@@ -293,7 +293,25 @@ function parseModelOverride(raw: unknown, where: string, warnings: string[]): Mo
   return override;
 }
 
-function parseHeaders(raw: unknown, where: string, warnings: string[]): Record<string, string> {
+/**
+ * Header names that carry a credential for this provider: `authorization`, `x-api-key`, and every
+ * header named as an auth scheme in `authHeaders`. They are stripped from every outgoing request
+ * before the selected scheme's header is set, and refused as static `headers`.
+ */
+export function credentialHeaderNames(authHeaders: Partial<Record<AuthTarget, string>>): Set<string> {
+  const names = new Set(["authorization", "x-api-key"]);
+  for (const scheme of Object.values(authHeaders)) {
+    if (scheme !== undefined && scheme !== "basic") names.add(scheme);
+  }
+  return names;
+}
+
+function parseHeaders(
+  raw: unknown,
+  where: string,
+  warnings: string[],
+  reserved: ReadonlySet<string> = credentialHeaderNames({}),
+): Record<string, string> {
   const headers: Array<[string, string]> = [];
   if (raw === undefined) return {};
   if (!isRecord(raw)) {
@@ -306,9 +324,10 @@ function parseHeaders(raw: unknown, where: string, warnings: string[]): Record<s
       continue;
     }
     const lower = name.toLowerCase();
-    if (lower === "authorization" || lower === "x-api-key") {
-      // A literal credential in a config file is exactly what apiKeyEnv/tokenFile exist to avoid.
-      warnings.push(`${where}: header ${JSON.stringify(name)} must not be set here; use apiKeyEnv or tokenFile`);
+    if (reserved.has(lower)) {
+      // A literal credential in a config file is exactly what apiKeyEnv/tokenFile exist to avoid,
+      // and a static value under an auth header's name would ride along as a second credential.
+      warnings.push(`${where}: header ${JSON.stringify(name)} is an auth header and must not be set here; use apiKeyEnv, tokenFile or passwordEnv`);
       continue;
     }
     headers.push([lower, value]);
@@ -420,12 +439,13 @@ export function parseProviderEntry(
     return undefined;
   }
 
+  const authHeaders = parseAuthHeaders(raw.authHeader, where, warnings);
   const config: GatewayConfig = {
     id,
     baseUrl,
-    authHeaders: parseAuthHeaders(raw.authHeader, where, warnings),
+    authHeaders,
     defaultApi: DEFAULT_API,
-    headers: parseHeaders(raw.headers, where, warnings),
+    headers: parseHeaders(raw.headers, where, warnings, credentialHeaderNames(authHeaders)),
     modelsPath: DEFAULT_MODELS_PATH,
     include: stringList(raw.include, "include", warnings, where),
     exclude: stringList(raw.exclude, "exclude", warnings, where),
@@ -669,11 +689,30 @@ export async function loadConfig(deps: LoadConfigDeps = {}): Promise<ParseResult
   }
   const merged = mergeProviders(fromEnv.providers, fromFile.providers, { envDefaultApiSet: fromEnv.defaultApiSet });
   const bound = bindEnvCredentials(merged, env);
+  const cleaned = dropCredentialHeaders(bound.providers);
   return {
     path,
-    providers: bound.providers,
-    warnings: [...fromEnv.warnings, ...fromFile.warnings, ...bound.warnings],
+    providers: cleaned.providers,
+    warnings: [...fromEnv.warnings, ...fromFile.warnings, ...bound.warnings, ...cleaned.warnings],
   };
+}
+
+/**
+ * After the env/file merge an auth header can come from INFERENCE_GATEWAY_AUTH_HEADER while a static
+ * header of the same name came from the file; drop such static headers (the value is never logged).
+ */
+export function dropCredentialHeaders(providers: GatewayConfig[]): ParseResult {
+  const warnings: string[] = [];
+  const cleaned = providers.map((provider) => {
+    const reserved = credentialHeaderNames(provider.authHeaders);
+    const kept = Object.entries(provider.headers).filter(([name]) => {
+      if (!reserved.has(name)) return true;
+      warnings.push(`${provider.id}: static header ${JSON.stringify(name)} is an auth header for this provider; ignored`);
+      return false;
+    });
+    return kept.length === Object.keys(provider.headers).length ? provider : { ...provider, headers: Object.fromEntries(kept) };
+  });
+  return { providers: cleaned, warnings };
 }
 
 /** The `INFERENCE_GATEWAY_*` variables that carry credentials. */
@@ -724,6 +763,13 @@ function isValidUsername(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 256 && !value.includes(":") && !hasControlChars(value);
 }
 
+/** Which credential a scheme needs: the token (Bearer / raw header) or the Basic pair. */
+export type CredentialKind = "token" | "basic";
+
+export function credentialKind(scheme: string): CredentialKind {
+  return scheme === "basic" ? "basic" : "token";
+}
+
 export interface GatewayCredentials {
   token?: string;
   basic?: { username: string; password: string };
@@ -740,10 +786,14 @@ export async function resolveCredentials(
   config: Pick<GatewayConfig, "apiKeyEnv" | "tokenFile" | "username" | "usernameEnv" | "passwordEnv" | "passwordFile">,
   env: Record<string, string | undefined> = process.env,
   readText: (path: string) => Promise<string | undefined> = readTextIfExists,
+  want: CredentialKind | "all" = "all",
 ): Promise<GatewayCredentials> {
   const credentials: GatewayCredentials = { problems: [] };
-  const token = await resolveToken(config, env, readText);
-  if (token) credentials.token = token;
+  if (want !== "basic") {
+    const token = await resolveToken(config, env, readText);
+    if (token) credentials.token = token;
+  }
+  if (want === "token") return credentials;
 
   let password: string | undefined;
   if (config.passwordFile) {

@@ -16,7 +16,7 @@ import type {
   OpenAIResponsesCompat,
   ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import { authHeaderEntry, authHeaderFor, type CompatOverride, type GatewayCredentials, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
+import { authHeaderEntry, authHeaderFor, credentialHeaderNames, type CompatOverride, type GatewayCredentials, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
 
 export const LIMITS = {
   maxIdLength: 256,
@@ -601,7 +601,9 @@ export function discoveryHeaders(
 ): Record<string, string> {
   const resolved = typeof credentials === "string" ? { token: credentials, problems: [] } : (credentials ?? { problems: [] });
   const entry = authHeaderEntry(authHeaderFor(config, "discovery"), resolved);
-  return Object.fromEntries([...Object.entries(config.headers), ...(entry ? [entry] : [])]);
+  const reserved = credentialHeaderNames(config.authHeaders);
+  const statics = Object.entries(config.headers).filter(([name]) => !reserved.has(name.toLowerCase()));
+  return Object.fromEntries([...statics, ...(entry ? [entry] : [])]);
 }
 
 export function modelsUrl(config: Pick<GatewayConfig, "baseUrl" | "modelsPath">): string {

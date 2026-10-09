@@ -17,8 +17,11 @@ import type {
 import {
   authHeaderEntry,
   authHeaderFor,
+  credentialHeaderNames,
+  credentialKind,
   loadConfig,
   resolveCredentials,
+  type CredentialKind,
   type GatewayApi,
   type GatewayConfig,
   type GatewayCredentials,
@@ -45,8 +48,12 @@ export interface RuntimeDeps {
 
 // --- request fetch --------------------------------------------------------------------------
 
-/** Resolves the configured credentials; called per request so token and password files are re-read. */
-export type CredentialSource = () => Promise<GatewayCredentials>;
+/**
+ * Resolves the credential a scheme needs; called per request so token and password files are
+ * re-read. Only that credential is read: an unreadable password file must not break a Bearer
+ * target, nor an unreadable token file a Basic one.
+ */
+export type CredentialSource = (scheme: string) => Promise<GatewayCredentials>;
 
 /**
  * The `fetch` every inference request goes through. Two jobs:
@@ -66,19 +73,21 @@ export type CredentialSource = () => Promise<GatewayCredentials>;
 export function createGatewayFetch({
   scheme,
   credentials,
+  strip = ["authorization", "x-api-key"],
   baseFetch,
 }: {
   scheme: string;
   credentials: CredentialSource;
+  /** Every header name that carries a credential for this provider (see credentialHeaderNames). */
+  strip?: Iterable<string>;
   baseFetch?: FetchFunction;
 }): FetchFunction {
   return async (input, init) => {
     const transport = baseFetch ?? globalThis.fetch;
     const headers = new Headers(input instanceof Request ? input.headers : undefined);
     new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
-    headers.delete("authorization");
-    headers.delete("x-api-key");
-    const entry = authHeaderEntry(scheme, await credentials());
+    for (const name of strip) headers.delete(name);
+    const entry = authHeaderEntry(scheme, await credentials(scheme));
     if (entry) headers.set(entry[0], entry[1]);
     return transport(input, { ...init, headers, redirect: "error" });
   };
@@ -90,9 +99,14 @@ export function createGatewayFetch({
  * *underneath*: it stays the transport that dials, and the rewrite runs first. The spread keeps
  * optional members a pi release may add to the lazy wrapper.
  */
-export function withGatewayFetch(base: ProviderStreams, scheme: string, credentials: CredentialSource): ProviderStreams {
+export function withGatewayFetch(
+  base: ProviderStreams,
+  scheme: string,
+  credentials: CredentialSource,
+  strip: Iterable<string> = ["authorization", "x-api-key"],
+): ProviderStreams {
   const fetchFor = (fetch: FetchFunction | undefined) =>
-    createGatewayFetch({ scheme, credentials, ...(fetch ? { baseFetch: fetch } : {}) });
+    createGatewayFetch({ scheme, credentials, strip, ...(fetch ? { baseFetch: fetch } : {}) });
   const wrapped: ProviderStreams = {
     ...base,
     stream: (model, context, options) => base.stream(model, context, { ...options, fetch: fetchFor(options?.fetch) }),
@@ -111,7 +125,7 @@ export function withGatewayFetch(base: ProviderStreams, scheme: string, credenti
 
 /** Credentials for one gateway, resolved fresh from its config on every call. */
 export function credentialSource(config: GatewayConfig, deps: RuntimeDeps = {}): CredentialSource {
-  return () => resolveCredentials(config, deps.env ?? process.env, deps.readText);
+  return (scheme) => resolveCredentials(config, deps.env ?? process.env, deps.readText, credentialKind(scheme));
 }
 
 /**
@@ -121,7 +135,9 @@ export function credentialSource(config: GatewayConfig, deps: RuntimeDeps = {}):
  */
 export function gatewayStreams(config: GatewayConfig, deps: RuntimeDeps = {}): Record<GatewayApi, ProviderStreams> {
   const credentials = credentialSource(config, deps);
-  const transport = (api: GatewayApi, base: ProviderStreams) => withGatewayFetch(base, authHeaderFor(config, api), credentials);
+  const strip = [...credentialHeaderNames(config.authHeaders)];
+  const transport = (api: GatewayApi, base: ProviderStreams) =>
+    withGatewayFetch(base, authHeaderFor(config, api), credentials, strip);
   return {
     "anthropic-messages": transport("anthropic-messages", anthropicMessagesApi()),
     "openai-responses": transport("openai-responses", openAIResponsesApi()),
@@ -146,10 +162,32 @@ export function gatewayAuth(config: GatewayConfig, deps: RuntimeDeps = {}): ApiK
   return {
     name: `Inference gateway (${config.id})`,
     async resolve(): Promise<AuthResult | undefined> {
-      const credentials = await resolveCredentials(config, deps.env ?? process.env, deps.readText);
+      // Each kind is resolved on its own: an unreadable password file must not hide a working
+      // token (or the reverse) — every request only needs one of them.
+      const settle = async (kind: CredentialKind) => {
+        try {
+          return { value: await resolveCredentials(config, deps.env ?? process.env, deps.readText, kind) };
+        } catch (error) {
+          return { error: error instanceof Error ? error : new Error(String(error)) };
+        }
+      };
+      const [tokenResult, basicResult] = await Promise.all([settle("token"), settle("basic")]);
+      const credentials: GatewayCredentials = {
+        ...(tokenResult.value?.token ? { token: tokenResult.value.token } : {}),
+        ...(basicResult.value?.basic ? { basic: basicResult.value.basic } : {}),
+        problems: [...(tokenResult.value?.problems ?? []), ...(basicResult.value?.problems ?? [])],
+      };
       for (const problem of credentials.problems) warnOnce(problem);
-      if (!credentials.token && config.tokenFile) warnOnce(`token file ${config.tokenFile} is missing or empty`);
-      if (!credentials.token && !credentials.basic) return undefined;
+      if (!credentials.token && !credentials.basic) {
+        const failure = tokenResult.error ?? basicResult.error;
+        if (failure) throw failure;
+        if (config.tokenFile) warnOnce(`token file ${config.tokenFile} is missing or empty`);
+        return undefined;
+      }
+      for (const failure of [tokenResult.error, basicResult.error]) {
+        if (failure) warnOnce(`could not read a credential: ${failure.message}`);
+      }
+      if (!credentials.token && config.tokenFile && !tokenResult.error) warnOnce(`token file ${config.tokenFile} is missing or empty`);
       // pi needs a non-empty apiKey to dispatch a request; the request fetch replaces whatever the
       // SDK makes of it with the configured scheme's header, so with Basic only a placeholder is passed.
       return credentials.token
@@ -160,6 +198,11 @@ export function gatewayAuth(config: GatewayConfig, deps: RuntimeDeps = {}): ApiK
 }
 
 // --- provider ---------------------------------------------------------------------------------
+
+/** The credential discovery's own scheme needs (and only that). */
+function discoveryCredentials(config: GatewayConfig, deps: RuntimeDeps): Promise<GatewayCredentials> {
+  return resolveCredentials(config, deps.env ?? process.env, deps.readText, credentialKind(authHeaderFor(config, "discovery")));
+}
 
 /**
  * What createProvider gets: auth, the transport map and a static model list. No `fetchModels` —
@@ -222,13 +265,15 @@ export function createGatewayProvider(
     }
     if (!context.allowNetwork || context.signal.aborted) return;
     const fetched = await discoverModels(config, {
-      credentials: await resolveCredentials(config, deps.env ?? process.env, deps.readText),
+      credentials: await discoveryCredentials(config, deps),
       signal: context.signal,
       ...(deps.fetch ? { fetch: deps.fetch } : {}),
     });
     if (context.signal.aborted) return;
     await context.publish({
-      persist: { models: fetched, checkedAt: Date.now() },
+      // Static headers are config, not catalog: they stay out of pi's models-store file and are
+      // rebuilt from the current config on restore (rebindModels).
+      persist: { models: fetched.map((model) => ({ ...model, headers: undefined })), checkedAt: Date.now() },
       update: () => {
         current = fetched;
         fresh = true;
@@ -251,7 +296,7 @@ export async function initialModels(
   timeoutMs: number = FACTORY_DISCOVERY_TIMEOUT_MS,
 ): Promise<{ models: GatewayModel[]; fresh: boolean }> {
   try {
-    const credentials = await resolveCredentials(config, deps.env ?? process.env, deps.readText);
+    const credentials = await discoveryCredentials(config, deps);
     const models = await discoverModels(config, {
       credentials,
       timeoutMs,

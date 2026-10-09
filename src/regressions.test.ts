@@ -6,8 +6,8 @@ import assert from "node:assert/strict";
 import { InMemoryModelsStore, createModels, normalizeContext } from "@earendil-works/pi-ai";
 import type { Context, FetchFunction, Model, RefreshModelsContext } from "@earendil-works/pi-ai";
 import { loadConfig, parseConfigFile, type GatewayApi, type GatewayConfig } from "./config.ts";
-import { buildModel, parseModelEntry, type GatewayModel } from "./discovery.ts";
-import { createGatewayProvider, initialModels } from "./provider.ts";
+import { buildModel, discoveryHeaders, parseModelEntry, type GatewayModel } from "./discovery.ts";
+import { createGatewayProvider, gatewayAuth, initialModels } from "./provider.ts";
 import { sseFor } from "./test-fixtures.ts";
 
 function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
@@ -245,5 +245,147 @@ describe("review 8: model ids that are Object.prototype names cannot corrupt con
       const built = buildModel(entry, config());
       assert.equal(built.name, id, `${id} picked up an inherited override`);
     }
+  });
+});
+
+describe("review 9: configured auth header names never carry stale or extra credentials", () => {
+  it("refuses a static header that shares a configured auth header's name", () => {
+    const { providers, warnings } = parseConfigFile(
+      {
+        providers: {
+          gw: {
+            baseUrl: "https://gw.example.com",
+            authHeader: { "anthropic-messages": "x-gateway-key", "openai-responses": "basic" },
+            headers: { "X-Gateway-Key": "stale", "x-team": "docs" },
+          },
+        },
+      },
+      "/home/user",
+    );
+    assert.deepEqual(providers[0].headers, { "x-team": "docs" });
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].includes("stale"), false);
+  });
+
+  it("refuses it when the auth header comes from the environment", async () => {
+    const { providers, warnings } = await loadConfig({
+      env: { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com", INFERENCE_GATEWAY_AUTH_HEADER: "x-gateway-key" },
+      home: "/home/user",
+      readText: async () => JSON.stringify({ providers: { gateway: { baseUrl: "https://gw.example.com", headers: { "x-gateway-key": "stale" } } } }),
+    });
+    assert.deepEqual(providers[0].headers, {});
+    assert.equal(warnings.length, 1);
+  });
+
+  function sent(cfg: GatewayConfig, id: string, env: Record<string, string>) {
+    const seen: Headers[] = [];
+    const fetch: FetchFunction = async (input, init) => {
+      const request = new Request(input, init);
+      seen.push(new Headers(request.headers));
+      const body = JSON.parse(await request.text());
+      return new Response(sseFor(new URL(request.url).pathname, String(body.model), "ok"), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    };
+    return { seen, fetch, env };
+  }
+
+  // Static headers reach the transport through model.headers; build the model with the header
+  // directly, as a pre-fix config or a hand-built model would, to test the strip on its own.
+  const mixed = config({
+    apiKeyEnv: "GW_KEY",
+    usernameEnv: "U",
+    passwordEnv: "P",
+    authHeaders: { "anthropic-messages": "x-gateway-key", "openai-responses": "basic" },
+  });
+
+  it("an absent token sends no auth header, not a stale one", async () => {
+    const { seen, fetch } = sent(mixed, "c", {});
+    const claude = { ...model("c", "anthropic-messages", mixed), headers: { "x-gateway-key": "stale" } };
+    const provider = createGatewayProvider(mixed, { models: [claude], fresh: true }, { env: { U: "gateway", P: "pw" } });
+    await provider.streamSimple(claude, CONTEXT, { apiKey: "basic-auth", fetch, maxRetries: 0 }).result();
+    assert.equal(seen[0].has("x-gateway-key"), false, "stale static credential sent");
+  });
+
+  it("a Basic target carries exactly one credential", async () => {
+    const { seen, fetch } = sent(mixed, "g", {});
+    const gpt = { ...model("g", "openai-responses", mixed), headers: { "x-gateway-key": "stale" } };
+    const provider = createGatewayProvider(mixed, { models: [gpt], fresh: true }, { env: { GW_KEY: "tok", U: "gateway", P: "pw" } });
+    await provider.streamSimple(gpt, CONTEXT, { apiKey: "tok", fetch, maxRetries: 0 }).result();
+    assert.match(seen[0].get("authorization") ?? "", /^Basic /);
+    assert.equal(seen[0].has("x-gateway-key"), false, "a second credential rode along");
+    assert.equal(seen[0].has("x-api-key"), false);
+  });
+
+  it("discovery strips configured auth header names from static headers too", () => {
+    const headers = discoveryHeaders(
+      { headers: { "x-gateway-key": "stale", "x-team": "docs" }, authHeaders: { "anthropic-messages": "x-gateway-key", discovery: "basic" } },
+      { basic: { username: "gateway", password: "pw" }, problems: [] },
+    );
+    assert.deepEqual(Object.keys(headers).sort(), ["authorization", "x-team"]);
+  });
+
+  it("persisted snapshots carry no static headers", async () => {
+    const persisted: unknown[] = [];
+    const fetch: FetchFunction = async () => new Response(JSON.stringify({ data: [{ id: "a", owned_by: "openai" }] }), { status: 200 });
+    const cfg = config({ headers: { "x-team": "docs" } });
+    const provider = createGatewayProvider(cfg, { models: [], fresh: true }, { env: ENV, fetch });
+    assert.ok(provider.refreshModels);
+    await provider.refreshModels(
+      context({
+        allowNetwork: true,
+        publish: async (publication) => {
+          if (publication.persist) persisted.push(...publication.persist.models);
+          publication.update?.();
+          return true;
+        },
+      }),
+    );
+    assert.equal(persisted.length, 1);
+    assert.equal(JSON.stringify(persisted).includes("x-team"), false, "static headers were persisted");
+    assert.deepEqual(provider.getModels()[0].headers, { "x-team": "docs" }, "the live model still has them");
+  });
+});
+
+describe("review 11: each request resolves only the credential its scheme needs", () => {
+  const unreadable = (path: string) => async (file: string) => {
+    if (file === path) throw Object.assign(new Error(`EACCES: permission denied, open '${file}'`), { code: "EACCES" });
+    return undefined;
+  };
+
+  async function call(cfg: GatewayConfig, api: GatewayApi, env: Record<string, string>, readText: (path: string) => Promise<string | undefined>) {
+    const seen: Headers[] = [];
+    const fetch: FetchFunction = async (input, init) => {
+      const request = new Request(input, init);
+      seen.push(new Headers(request.headers));
+      const body = JSON.parse(await request.text());
+      return new Response(sseFor(new URL(request.url).pathname, String(body.model), "ok"), { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const target = model(`m-${api}`, api, cfg);
+    const provider = createGatewayProvider(cfg, { models: [target], fresh: true }, { env, readText });
+    const message = await provider.streamSimple(target, CONTEXT, { apiKey: "x", fetch, maxRetries: 0 }).result();
+    return { message, seen };
+  }
+
+  it("an unreadable passwordFile does not break a Bearer target", async () => {
+    const cfg = config({ apiKeyEnv: "GW_KEY", passwordFile: "/run/pw", authHeaders: { "anthropic-messages": "basic" } });
+    const { message, seen } = await call(cfg, "openai-responses", { GW_KEY: "tok" }, unreadable("/run/pw"));
+    assert.equal(message.stopReason, "stop", message.errorMessage ?? "");
+    assert.equal(seen[0].get("authorization"), "Bearer tok");
+  });
+
+  it("an unreadable tokenFile does not break a Basic target", async () => {
+    const cfg = config({ apiKeyEnv: undefined, tokenFile: "/run/token", passwordEnv: "P", authHeaders: { "openai-completions": "basic" } });
+    const { message, seen } = await call(cfg, "openai-completions", { P: "test-pass" }, unreadable("/run/token")); // gitleaks:allow (test fixture)
+    assert.equal(message.stopReason, "stop", message.errorMessage ?? "");
+    assert.equal(seen[0].get("authorization"), "Basic Z2F0ZXdheTp0ZXN0LXBhc3M=");
+  });
+
+  it("pi still sees the provider as configured when one of the two is unreadable", async () => {
+    const cfg = config({ apiKeyEnv: "GW_KEY", passwordFile: "/run/pw" });
+    const auth = gatewayAuth(cfg, { env: { GW_KEY: "tok" }, readText: unreadable("/run/pw"), warn: () => {} });
+    const resolved = await auth.resolve({ ctx: { env: async () => undefined, fileExists: async () => false }, signal: new AbortController().signal });
+    assert.equal(resolved?.auth.apiKey, "tok");
   });
 });
