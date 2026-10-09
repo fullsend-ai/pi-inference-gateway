@@ -979,6 +979,26 @@ describe("discoverModels: OpenAI- and Anthropic-format lists", () => {
     const headers = anthropicListHeaders({ headers: { "Anthropic-Version": "2024-01-01" }, authHeaders: {} }, "tok");
     assert.deepEqual(headers, { "Anthropic-Version": "2024-01-01", "x-api-key": "tok" });
   });
+
+  it("keeps a static anthropic-version header off the OpenAI-format list headers", () => {
+    const headers = discoveryHeaders({ headers: { "Anthropic-Version": "2024-01-01", "x-team": "docs" }, authHeaders: {} }, "tok");
+    assert.deepEqual(headers, { "x-team": "docs", authorization: "Bearer tok" });
+  });
+
+  it("with a static anthropic-version header, sends it only on the Anthropic-format request and merges both catalogs", async () => {
+    const { calls, fetch } = twoLists(
+      () => json(openaiBody),
+      () => json(anthropicList(["alias-q"])),
+    );
+    const models = await discoverModels(config({ headers: { "anthropic-version": "2024-01-01" } }), { token: "tok", fetch });
+    assert.equal(calls.length, 2);
+    const openai = calls.find((call) => !isAnthropic(call));
+    const anthropic = calls.find(isAnthropic);
+    assert.ok(openai && anthropic);
+    assert.equal(new Headers(openai.init?.headers).has("anthropic-version"), false);
+    assert.equal(new Headers(anthropic.init?.headers).get("anthropic-version"), "2024-01-01");
+    assert.deepEqual(models.map((model) => model.id).sort(), ["alias-q", "shared-q", "vendor-q"]);
+  });
 });
 
 describe("mergeModelLists: shared wildcards", () => {
@@ -994,6 +1014,28 @@ describe("mergeModelLists: shared wildcards", () => {
     assert.equal(merged.entries.length, LIMITS.maxModels - 25, "models and wildcards fill the cap exactly");
     assert.equal(merged.entries.filter((entry) => entry.id.startsWith("claude-")).length, 5);
     assert.equal(merged.dropped, 5, "only the models past the cap are dropped");
+  });
+
+  it("limits the second list's new wildcards by the shared budget, after its models", () => {
+    const openai = parseModelList({ data: Array.from({ length: LIMITS.maxModels - 1 }, (_, index) => ({ id: `chat-${index}` })) });
+    const anthropic = parseModelList({ data: [{ id: "a-*" }, { id: "b-*" }, { id: "claude-1" }] });
+    const merged = mergeModelLists(openai, anthropic);
+    assert.equal(merged.entries.length, LIMITS.maxModels, "the concrete Anthropic model keeps the last slot");
+    assert.ok(merged.entries.some((entry) => entry.id === "claude-1"));
+    assert.equal(merged.wildcardCount, 0);
+    assert.equal(merged.wildcardIds.size, 0);
+    assert.deepEqual(merged.wildcards, []);
+    assert.equal(merged.dropped, 2, "both wildcards are dropped");
+  });
+
+  it("keeps disjoint wildcard-only lists within the cap, consistently", () => {
+    const wildcardList = (prefix: string) => parseModelList({ data: Array.from({ length: LIMITS.maxModels }, (_, index) => ({ id: `${prefix}-${index}/*` })) });
+    const merged = mergeModelLists(wildcardList("a"), wildcardList("b"));
+    assert.equal(merged.wildcardCount, LIMITS.maxModels);
+    assert.equal(merged.wildcardIds.size, LIMITS.maxModels);
+    assert.equal(merged.entries.length, 0);
+    assert.equal(merged.dropped, LIMITS.maxModels, "the second list's wildcards are all dropped");
+    assert.ok(merged.wildcards.length <= 20);
   });
 });
 
