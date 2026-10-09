@@ -142,7 +142,7 @@ describe("review 3: a successful refresh replaces the startup list (through pi's
     return { fetch, deps: { env: ENV, fetch } };
   }
 
-  it("removes a model the gateway dropped, and clears on an empty list", async () => {
+  it("removes a model the gateway dropped; an empty list is a failure and keeps the last list", async () => {
     const { deps } = gateway([{ data: [{ id: "a" }, { id: "b" }] }, { data: [{ id: "a" }] }, { data: [] }]);
     const cfg = config();
     const startup = await initialModels(cfg, deps);
@@ -155,9 +155,11 @@ describe("review 3: a successful refresh replaces the startup list (through pi's
     assert.equal(first.errors.size, 0, [...first.errors.values()].join());
     assert.deepEqual(ids(models.getModels("gateway")), ["a"]);
 
+    // Lesson 1 (2026-10-09): an empty list used to clear the provider; it is now an error, so a
+    // gateway that briefly answers `{data: []}` does not wipe the catalog.
     const second = await models.refresh({ allowNetwork: true });
-    assert.equal(second.errors.size, 0, [...second.errors.values()].join());
-    assert.deepEqual(ids(models.getModels("gateway")), []);
+    assert.match([...second.errors.values()].join(), /model list is empty/);
+    assert.deepEqual(ids(models.getModels("gateway")), ["a"]);
   });
 
   it("a later process restores the persisted list when its own discovery fails", async () => {

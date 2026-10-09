@@ -199,6 +199,24 @@ export function gatewayAuth(config: GatewayConfig, deps: RuntimeDeps = {}): ApiK
 
 // --- provider ---------------------------------------------------------------------------------
 
+/** `deps.warn` (or console.warn) with this provider's log prefix. */
+function providerWarn(config: GatewayConfig, deps: RuntimeDeps): (message: string) => void {
+  return (message) => (deps.warn ?? console.warn)(`${LOG_PREFIX} ${config.id}: ${message}`);
+}
+
+/**
+ * A warn function that prints each distinct message once per process: load-time discovery and
+ * every later refresh report the same list findings, and the user needs to read them once.
+ */
+export function onceWarn(warn: (message: string) => void = console.warn): (message: string) => void {
+  const seen = new Set<string>();
+  return (message) => {
+    if (seen.has(message)) return;
+    seen.add(message);
+    warn(message);
+  };
+}
+
 /** The credential discovery's own scheme needs (and only that). */
 function discoveryCredentials(config: GatewayConfig, deps: RuntimeDeps): Promise<GatewayCredentials> {
   return resolveCredentials(config, deps.env ?? process.env, deps.readText, credentialKind(authHeaderFor(config, "discovery")));
@@ -267,6 +285,7 @@ export function createGatewayProvider(
     const fetched = await discoverModels(config, {
       credentials: await discoveryCredentials(config, deps),
       signal: context.signal,
+      warn: providerWarn(config, deps),
       ...(deps.fetch ? { fetch: deps.fetch } : {}),
     });
     if (context.signal.aborted) return;
@@ -300,6 +319,7 @@ export async function initialModels(
     const models = await discoverModels(config, {
       credentials,
       timeoutMs,
+      warn: providerWarn(config, deps),
       ...(deps.fetch ? { fetch: deps.fetch } : {}),
     });
     return { models, fresh: true };
@@ -330,9 +350,10 @@ export interface ProviderRegistry {
  */
 export async function registerGateways(
   pi: ProviderRegistry,
-  deps: RuntimeDeps & Pick<LoadConfigDeps, "home"> = {},
+  input: RuntimeDeps & Pick<LoadConfigDeps, "home"> = {},
 ): Promise<string[]> {
-  const warn = deps.warn ?? console.warn;
+  const warn = onceWarn(input.warn);
+  const deps = { ...input, warn };
   const { providers, warnings } = await loadConfig({
     ...(deps.env ? { env: deps.env } : {}),
     ...(deps.home ? { home: deps.home } : {}),

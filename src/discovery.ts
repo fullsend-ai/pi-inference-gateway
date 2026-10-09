@@ -17,7 +17,7 @@ import type {
   OpenAIResponsesCompat,
   ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import { authHeaderEntry, authHeaderFor, credentialHeaderNames, type CompatOverride, type GatewayCredentials, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
+import { authHeaderEntry, authHeaderFor, credentialHeaderNames, ENV, type CompatOverride, type GatewayCredentials, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
 
 export const LIMITS = {
   maxIdLength: 256,
@@ -246,11 +246,39 @@ export interface ParsedModelList {
   entries: GatewayModelEntry[];
   /** Entries dropped as malformed, duplicate, or over the list cap. */
   dropped: number;
+  /** Ids containing `*`: a gateway listing a routing pattern (agentgateway `openai/*`), not a model. */
+  wildcards: string[];
+  /** Entries dropped as embedding, image, audio, rerank, ... models (see isNonChatEntry). */
+  nonChat: number;
+}
+
+/**
+ * LiteLLM `mode` / generic `type` values of models that are not chat models: embeddings, image,
+ * audio, video, rerank, moderation, OCR. Matched as a prefix, lower-cased. `chat`, `completion`,
+ * `responses` and anything unknown stay.
+ */
+const NON_CHAT_KIND_RE = /^(embed|image|audio|video|rerank|moderation|speech|transcri|tts|stt|ocr)/;
+
+/**
+ * Whether a raw list entry describes a model pi cannot chat with: a LiteLLM `mode` or a `type`
+ * naming a non-chat kind, or OpenRouter-style `architecture.output_modalities` without `text`.
+ * The OpenAI list's `object: "model"` says nothing and is ignored.
+ */
+export function isNonChatEntry(raw: unknown): boolean {
+  if (!isRecord(raw)) return false;
+  const info = isRecord(raw.model_info) ? { ...raw.model_info, ...raw } : raw;
+  for (const key of ["mode", "type"]) {
+    const kind = info[key];
+    if (typeof kind === "string" && NON_CHAT_KIND_RE.test(kind.trim().toLowerCase())) return true;
+  }
+  const outputs = isRecord(info.architecture) ? info.architecture.output_modalities : undefined;
+  return Array.isArray(outputs) && outputs.length > 0 && !outputs.includes("text");
 }
 
 /**
  * Parse a model-list body: OpenAI `{data:[...]}`, `{models:[...]}`, or a bare array.
- * Duplicates keep the first occurrence; the list is capped at `LIMITS.maxModels`.
+ * Non-chat entries and wildcard ids are set aside first, so they never count against the cap;
+ * duplicates keep the first occurrence; the list is capped at `LIMITS.maxModels`.
  */
 export function parseModelList(body: unknown): ParsedModelList {
   let list: unknown[];
@@ -260,10 +288,20 @@ export function parseModelList(body: unknown): ParsedModelList {
   else throw new Error("model list has no `data` or `models` array");
 
   const entries: GatewayModelEntry[] = [];
+  const wildcards: string[] = [];
   const seen = new Set<string>();
   let dropped = 0;
+  let nonChat = 0;
   for (const raw of list) {
+    if (isNonChatEntry(raw)) {
+      nonChat++;
+      continue;
+    }
     const entry = parseModelEntry(raw);
+    if (entry?.id.includes("*")) {
+      if (!wildcards.includes(entry.id)) wildcards.push(entry.id);
+      continue;
+    }
     if (!entry || seen.has(entry.id) || entries.length >= LIMITS.maxModels) {
       dropped++;
       continue;
@@ -271,7 +309,34 @@ export function parseModelList(body: unknown): ParsedModelList {
     seen.add(entry.id);
     entries.push(entry);
   }
-  return { entries, dropped };
+  return { entries, dropped, wildcards, nonChat };
+}
+
+/** The one warning for wildcard ids, or none. */
+function wildcardWarning(wildcards: readonly string[]): string[] {
+  if (wildcards.length === 0) return [];
+  const shown = wildcards.slice(0, 5).join(", ") + (wildcards.length > 5 ? ` (+${wildcards.length - 5} more)` : "");
+  return [
+    `ignored wildcard model id(s) ${shown}: the gateway lists a routing pattern, not a model; ` +
+      `add concrete ids via "models" in the config file (or ${ENV.extraModels})`,
+  ];
+}
+
+/**
+ * Throws when a successfully fetched list has no usable model: an empty list, or one whose every
+ * entry was malformed, a wildcard or a non-chat model. Treated like a failed fetch, so the last
+ * good list (or pi's snapshot and the fallbacks) stays instead of an empty catalog.
+ */
+function assertUsable(parsed: ParsedModelList): void {
+  if (parsed.entries.length > 0) return;
+  const total = parsed.dropped + parsed.wildcards.length + parsed.nonChat;
+  if (total === 0) throw new Error("model list is empty");
+  const parts = [
+    parsed.wildcards.length > 0 ? `${parsed.wildcards.length} wildcard` : "",
+    parsed.nonChat > 0 ? `${parsed.nonChat} non-chat` : "",
+    parsed.dropped > 0 ? `${parsed.dropped} malformed` : "",
+  ].filter(Boolean);
+  throw new Error(`model list has no usable model (${parts.join(", ")})`);
 }
 
 // --- selection --------------------------------------------------------------------------------
@@ -593,12 +658,23 @@ export function extraModels(config: GatewayConfig, listedIds: ReadonlySet<string
     .map(([id]) => buildModel({ id, endpoints: [], owners: [] }, config));
 }
 
-/** Parse, filter, build, and append config-added models. Throws only on an unusable body shape. */
-export function modelsFromList(body: unknown, config: GatewayConfig): { models: GatewayModel[]; dropped: number } {
-  const { entries, dropped } = parseModelList(body);
+export interface ModelsFromList {
+  models: GatewayModel[];
+  dropped: number;
+  /** Things the user should hear about once (wildcard ids, ...); never a credential. */
+  warnings: string[];
+}
+
+function buildFromParsed(parsed: ParsedModelList, config: GatewayConfig): ModelsFromList {
+  const { entries, dropped, wildcards } = parsed;
   const listed = entries.filter((entry) => isIncluded(entry.id, config)).map((entry) => buildModel(entry, config));
   const listedIds = new Set(entries.map((entry) => entry.id));
-  return { models: [...listed, ...extraModels(config, listedIds)], dropped };
+  return { models: [...listed, ...extraModels(config, listedIds)], dropped, warnings: wildcardWarning(wildcards) };
+}
+
+/** Parse, filter, build, and append config-added models. Throws only on an unusable body shape. */
+export function modelsFromList(body: unknown, config: GatewayConfig): ModelsFromList {
+  return buildFromParsed(parseModelList(body), config);
 }
 
 /** The request headers for discovery: static config headers plus the token in the configured header. */
@@ -625,9 +701,14 @@ export interface DiscoverOptions {
   fetch?: FetchFunction;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Receives each non-fatal finding about the list (wildcard ids, ...), unprefixed. */
+  warn?: (message: string) => void;
 }
 
-/** Fetch and build the gateway's models. Rejects on any network, HTTP, size or shape failure. */
+/**
+ * Fetch and build the gateway's models. Rejects on any network, HTTP, size or shape failure, and on
+ * a list with no usable model (see assertUsable): an empty catalog is never published.
+ */
 export async function discoverModels(config: GatewayConfig, options: DiscoverOptions): Promise<GatewayModel[]> {
   const body = await fetchModelList({
     url: modelsUrl(config),
@@ -636,7 +717,11 @@ export async function discoverModels(config: GatewayConfig, options: DiscoverOpt
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   });
-  return modelsFromList(body, config).models;
+  const parsed = parseModelList(body);
+  const built = buildFromParsed(parsed, config);
+  for (const warning of built.warnings) options.warn?.(warning);
+  assertUsable(parsed);
+  return built.models;
 }
 
 /** A cached pi model as if the gateway had described it: its transport and metadata become hints. */

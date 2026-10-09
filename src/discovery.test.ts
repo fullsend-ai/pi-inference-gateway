@@ -673,7 +673,7 @@ describe("discoverModels", () => {
   });
 
   it("uses the configured auth header and models path", async () => {
-    const { calls, fetch } = stubFetch(() => json([]));
+    const { calls, fetch } = stubFetch(() => json(["some-model"]));
     await discoverModels(config({ authHeaders: { discovery: "x-api-key" }, modelsPath: "/models" }), { token: "tok", fetch });
     assert.equal(calls[0].url, "https://gw.example.com/models");
     const headers = new Headers(calls[0].init?.headers);
