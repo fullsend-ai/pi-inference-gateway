@@ -36,9 +36,12 @@ logs. Back to the [README](../README.md).
   key cannot be forwarded to another origin.
 - **Credentials are never logged.** Warnings name variables and files, never their values. A
   discovery error shows the start of a `text/plain` error body (or of a UTF-8 body sent without a
-  content-type) only after replacing every form of the credentials it sent; if any credential is
-  shorter than 8 characters (Basic's default username `gateway` is 7), the body is replaced by
-  `(body omitted)`. A body sent without a content-type that has control characters other than
-  tab, line feed and carriage return (as UTF-16 text has) is not shown at all.
+  content-type) only after replacing the credentials it sent: the token, the Basic username,
+  password, `user:password` pair and its base64, and the auth header value, each in its literal,
+  JSON-escaped and percent-encoded form. If any credential is shorter than 8 characters (Basic's
+  default username `gateway` is 7), the body is replaced by `(body omitted)`. A body that has
+  control characters other than tab, line feed and carriage return (as UTF-16 text has) is not
+  shown at all, so a credential in such an encoding is dropped rather than shown. Other
+  encodings of a credential are not recognised.
 - **Model-request error bodies are printed by pi, not by this extension**, and are not redacted:
   a gateway or backend that echoes the request's credentials in an error can expose them there.
