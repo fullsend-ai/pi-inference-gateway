@@ -16,7 +16,7 @@ import type {
   OpenAIResponsesCompat,
   ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import { authHeaderFor, type CompatOverride, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
+import { authHeaderEntry, authHeaderFor, type CompatOverride, type GatewayCredentials, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
 
 export const LIMITS = {
   maxIdLength: 256,
@@ -594,11 +594,14 @@ export function modelsFromList(body: unknown, config: GatewayConfig): { models: 
 }
 
 /** The request headers for discovery: static config headers plus the token in the configured header. */
-export function discoveryHeaders(config: Pick<GatewayConfig, "headers" | "authHeaders">, token: string | undefined): Record<string, string> {
-  const headers: Record<string, string> = { ...config.headers };
-  const name = authHeaderFor(config, "discovery");
-  if (token) headers[name] = name === "authorization" ? `Bearer ${token}` : token;
-  return headers;
+/** The request headers for discovery: static config headers plus the `discovery` auth scheme's header. */
+export function discoveryHeaders(
+  config: Pick<GatewayConfig, "headers" | "authHeaders">,
+  credentials: GatewayCredentials | string | undefined,
+): Record<string, string> {
+  const resolved = typeof credentials === "string" ? { token: credentials, problems: [] } : (credentials ?? { problems: [] });
+  const entry = authHeaderEntry(authHeaderFor(config, "discovery"), resolved);
+  return Object.fromEntries([...Object.entries(config.headers), ...(entry ? [entry] : [])]);
 }
 
 export function modelsUrl(config: Pick<GatewayConfig, "baseUrl" | "modelsPath">): string {
@@ -606,7 +609,9 @@ export function modelsUrl(config: Pick<GatewayConfig, "baseUrl" | "modelsPath">)
 }
 
 export interface DiscoverOptions {
-  token: string | undefined;
+  /** Resolved credentials, or a bare token (Bearer / raw-header schemes only). */
+  credentials?: GatewayCredentials;
+  token?: string;
   fetch?: FetchFunction;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -616,7 +621,7 @@ export interface DiscoverOptions {
 export async function discoverModels(config: GatewayConfig, options: DiscoverOptions): Promise<GatewayModel[]> {
   const body = await fetchModelList({
     url: modelsUrl(config),
-    headers: discoveryHeaders(config, options.token),
+    headers: discoveryHeaders(config, options.credentials ?? options.token),
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),

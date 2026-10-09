@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import {
   CONFIG_FILE_NAME,
   agentDir,
+  authHeaderEntry,
   authHeaderFor,
+  bindEnvCredentials,
+  resolveCredentials,
   parseAuthHeaderEnv,
   parseAuthHeaders,
   parseExtraModelsEnv,
@@ -317,6 +320,153 @@ describe("auth header overrides", () => {
       HOME,
     );
     assert.deepEqual(providers[0].authHeaders, { "anthropic-messages": "authorization" });
+  });
+});
+
+describe("auth schemes and Basic credentials", () => {
+  it("accepts bearer (alias of authorization), basic and header names", () => {
+    const warnings: string[] = [];
+    assert.deepEqual(parseAuthHeaders({ "anthropic-messages": "x-api-key", "openai-responses": "Bearer", discovery: "BASIC" }, "p", warnings), {
+      "anthropic-messages": "x-api-key",
+      "openai-responses": "authorization",
+      discovery: "basic",
+    });
+    assert.equal(parseAuthHeaderEnv("basic", warnings).discovery, "basic");
+    assert.deepEqual(warnings, []);
+  });
+
+  it("builds the exact header bytes per scheme", () => {
+    const credentials = { token: "tok", basic: { username: "gateway", password: "test-pass" }, problems: [] }; // gitleaks:allow (test fixture)
+    assert.deepEqual(authHeaderEntry("authorization", credentials), ["authorization", "Bearer tok"]);
+    assert.deepEqual(authHeaderEntry("x-api-key", credentials), ["x-api-key", "tok"]);
+    assert.deepEqual(authHeaderEntry("basic", credentials), ["authorization", "Basic Z2F0ZXdheTp0ZXN0LXBhc3M="]);
+    assert.deepEqual(authHeaderEntry("basic", { basic: { username: "svc", password: "p@ss w:rd" }, problems: [] }), [ // gitleaks:allow (test fixture)
+      "authorization",
+      "Basic c3ZjOnBAc3MgdzpyZA==",
+    ]);
+    assert.equal(authHeaderEntry("basic", { token: "tok", problems: [] }), undefined);
+    assert.equal(authHeaderEntry("authorization", { basic: { username: "u", password: "p" }, problems: [] }), undefined);
+  });
+
+  it("resolves Basic from env vars, with gateway as the default username", async () => {
+    const config = { usernameEnv: "U", passwordEnv: "P" };
+    assert.deepEqual((await resolveCredentials(config, { P: "pw" })).basic, { username: "gateway", password: "pw" });
+    assert.deepEqual((await resolveCredentials(config, { U: "svc", P: "pw" })).basic, { username: "svc", password: "pw" });
+    assert.deepEqual((await resolveCredentials({ ...config, username: "lit" }, { P: "pw" })).basic, { username: "lit", password: "pw" });
+    assert.equal((await resolveCredentials(config, {})).basic, undefined, "no password, no Basic");
+  });
+
+  it("re-reads the password file each call, and it wins over the variable", async () => {
+    let file = "p1\n";
+    const config = { passwordEnv: "P", passwordFile: "/run/pw" };
+    const read = async () => file;
+    assert.equal((await resolveCredentials(config, { P: "env" }, read)).basic?.password, "p1");
+    file = "p2\n";
+    assert.equal((await resolveCredentials(config, { P: "env" }, read)).basic?.password, "p2");
+  });
+
+  it("rejects a username containing ':' without echoing it", async () => {
+    const result = await resolveCredentials({ usernameEnv: "U", passwordEnv: "P" }, { U: "a:b", P: "pw" });
+    assert.equal(result.basic, undefined);
+    assert.equal(result.problems.length, 1);
+    assert.equal(result.problems[0].includes("a:b"), false);
+    const { warnings } = parseConfigFile({ providers: { gw: { baseUrl: "https://gw.example.com", username: "a:b" } } }, HOME);
+    assert.equal(warnings.length, 1);
+  });
+
+  it("refuses a literal password in the file", () => {
+    const { providers, warnings } = parseConfigFile({ providers: { gw: { baseUrl: "https://gw.example.com", password: "s3cret" } } }, HOME); // gitleaks:allow (test fixture)
+    assert.equal(providers.length, 0);
+    assert.equal(warnings.join().includes("s3cret"), false);
+  });
+
+  it("wires the INFERENCE_GATEWAY_BASIC_* variables into the env provider", () => {
+    const { providers } = envProvider(
+      { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com", INFERENCE_GATEWAY_BASIC_PASSWORD_FILE: "~/.config/gw/pass" },
+      HOME,
+    );
+    assert.equal(providers[0].usernameEnv, "INFERENCE_GATEWAY_BASIC_USER");
+    assert.equal(providers[0].passwordEnv, "INFERENCE_GATEWAY_BASIC_PASSWORD");
+    assert.equal(providers[0].passwordFile, "/home/user/.config/gw/pass");
+  });
+});
+
+describe("trusted-URL binding of INFERENCE_GATEWAY_* credentials", () => {
+  const file = (baseUrl: string, extra: Record<string, unknown> = {}) =>
+    async () => JSON.stringify({ providers: { other: { baseUrl, apiKeyEnv: "INFERENCE_GATEWAY_API_KEY", ...extra } } });
+
+  it("refuses a file provider that names an INFERENCE_GATEWAY_* credential for another URL", async () => {
+    const { providers, warnings } = await loadConfig({
+      env: { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com", INFERENCE_GATEWAY_API_KEY: "k" },
+      home: HOME,
+      readText: file("https://elsewhere.example.com"),
+    });
+    assert.deepEqual(
+      providers.map((provider) => provider.id),
+      ["gateway"],
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /other: refused .*INFERENCE_GATEWAY_API_KEY.*https:\/\/elsewhere\.example\.com/);
+    assert.equal(warnings[0].includes('"k"'), false);
+  });
+
+  it("refuses it when INFERENCE_GATEWAY_BASE_URL is unset", async () => {
+    const { providers, warnings } = await loadConfig({ env: { INFERENCE_GATEWAY_API_KEY: "k" }, home: HOME, readText: file("https://gw.example.com") });
+    assert.deepEqual(providers, []);
+    assert.match(warnings[0], /\(unset\)/);
+  });
+
+  it("refuses Basic variables the same way", async () => {
+    const { providers } = await loadConfig({
+      env: { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com" },
+      home: HOME,
+      readText: async () =>
+        JSON.stringify({ providers: { other: { baseUrl: "https://elsewhere.example.com", passwordEnv: "INFERENCE_GATEWAY_BASIC_PASSWORD" } } }),
+    });
+    assert.deepEqual(
+      providers.map((provider) => provider.id),
+      ["gateway"],
+    );
+  });
+
+  it("allows it for the same URL, ignoring a trailing slash and /v1", async () => {
+    for (const [envUrl, fileUrl] of [
+      ["https://gw.example.com", "https://gw.example.com"],
+      ["https://gw.example.com/v1/", "https://gw.example.com"],
+      ["https://GW.example.com:443/", "https://gw.example.com/v1"],
+      ["http://127.0.0.1:4000/proxy", "http://127.0.0.1:4000/proxy/v1/"],
+    ]) {
+      const { providers, warnings } = await loadConfig({ env: { INFERENCE_GATEWAY_BASE_URL: envUrl }, home: HOME, readText: file(fileUrl) });
+      assert.deepEqual(warnings, [], `${envUrl} vs ${fileUrl}`);
+      assert.ok(providers.some((provider) => provider.id === "other"), `${envUrl} vs ${fileUrl}`);
+    }
+  });
+
+  it("does not match a different path, port or scheme", async () => {
+    for (const fileUrl of ["https://gw.example.com/other", "https://gw.example.com:8443", "http://gw.example.com"]) {
+      const { providers } = await loadConfig({ env: { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com" }, home: HOME, readText: file(fileUrl) });
+      assert.equal(providers.some((provider) => provider.id === "other"), false, fileUrl);
+    }
+  });
+
+  it("leaves providers with their own variables alone", async () => {
+    const { providers, warnings } = await loadConfig({
+      env: {},
+      home: HOME,
+      readText: async () => JSON.stringify({ providers: { mine: { baseUrl: "https://elsewhere.example.com", apiKeyEnv: "MY_KEY" } } }),
+    });
+    assert.deepEqual(warnings, []);
+    assert.equal(providers[0].id, "mine");
+  });
+
+  it("is a pure function over the merged providers", () => {
+    const { providers } = bindEnvCredentials(
+      [
+        { ...envProvider({ INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com" }, HOME).providers[0] },
+      ],
+      { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com/" },
+    );
+    assert.equal(providers.length, 1);
   });
 });
 

@@ -47,16 +47,28 @@ export const NATIVE_AUTH_HEADERS: Readonly<Record<AuthTarget, string>> = {
   discovery: "authorization",
 };
 
-/** The header a request to `target` carries the token in. `authorization` means `Bearer <token>`. */
+/**
+ * How a request to `target` authenticates — an *auth scheme*:
+ *   - `authorization`  → `authorization: Bearer <token>`
+ *   - `basic`          → `authorization: Basic base64(<username>:<password>)`
+ *   - any other header → that header carrying the raw token (`x-api-key: <token>`)
+ * Configured as `bearer` (alias of `authorization`), `basic`, or a header name.
+ */
 export function authHeaderFor(config: Pick<GatewayConfig, "authHeaders">, target: AuthTarget): string {
   return config.authHeaders[target] ?? NATIVE_AUTH_HEADERS[target];
 }
+
+/** Basic auth's username when nothing sets one (Praxis's documented default). */
+export const DEFAULT_BASIC_USERNAME = "gateway";
 
 /** The environment contract. Unset base URL means the env provider is disabled. */
 export const ENV = {
   baseUrl: "INFERENCE_GATEWAY_BASE_URL",
   apiKey: "INFERENCE_GATEWAY_API_KEY",
   tokenFile: "INFERENCE_GATEWAY_TOKEN_FILE",
+  basicUser: "INFERENCE_GATEWAY_BASIC_USER",
+  basicPassword: "INFERENCE_GATEWAY_BASIC_PASSWORD", // gitleaks:allow (env var name, not a secret)
+  basicPasswordFile: "INFERENCE_GATEWAY_BASIC_PASSWORD_FILE",
   providerId: "INFERENCE_GATEWAY_PROVIDER_ID",
   defaultApi: "INFERENCE_GATEWAY_DEFAULT_API",
   authHeader: "INFERENCE_GATEWAY_AUTH_HEADER",
@@ -101,6 +113,14 @@ export interface GatewayConfig {
   apiKeyEnv?: string;
   /** File holding the token, re-read on every request. Wins over `apiKeyEnv`. */
   tokenFile?: string;
+  /** Basic auth: a literal username (not a secret), overridden by `usernameEnv`'s value. */
+  username?: string;
+  /** Basic auth: environment variable holding the username. */
+  usernameEnv?: string;
+  /** Basic auth: environment variable holding the password. Never a literal password. */
+  passwordEnv?: string;
+  /** Basic auth: file holding the password, re-read on every request. Wins over `passwordEnv`. */
+  passwordFile?: string;
   /**
    * Per-target header overrides (lower-case); a missing target uses NATIVE_AUTH_HEADERS.
    * `authorization` means `Bearer <token>`; any other header carries the raw token.
@@ -296,8 +316,11 @@ function parseHeaders(raw: unknown, where: string, warnings: string[]): Record<s
   return Object.fromEntries(headers);
 }
 
-function headerName(value: unknown): string | undefined {
-  return typeof value === "string" && HEADER_NAME_RE.test(value) ? value.toLowerCase() : undefined;
+/** `bearer` → `authorization`, `basic` stays `basic`, otherwise a valid lower-cased header name. */
+function authScheme(value: unknown): string | undefined {
+  if (typeof value !== "string" || !HEADER_NAME_RE.test(value)) return undefined;
+  const lower = value.toLowerCase();
+  return lower === "bearer" ? "authorization" : lower;
 }
 
 /**
@@ -307,19 +330,19 @@ function headerName(value: unknown): string | undefined {
 export function parseAuthHeaders(raw: unknown, where: string, warnings: string[]): Partial<Record<AuthTarget, string>> {
   const overrides: Partial<Record<AuthTarget, string>> = {};
   if (raw === undefined) return overrides;
-  const single = headerName(raw);
+  const single = authScheme(raw);
   if (single !== undefined) {
     for (const target of AUTH_TARGETS) overrides[target] = single;
     return overrides;
   }
   if (!isRecord(raw)) {
-    warnings.push(`${where}: "authHeader" must be a header name or an object keyed by ${AUTH_TARGETS.join(", ")}; ignored`);
+    warnings.push(`${where}: "authHeader" must be bearer, basic, a header name, or an object keyed by ${AUTH_TARGETS.join(", ")}; ignored`);
     return overrides;
   }
   for (const [target, value] of Object.entries(raw)) {
-    const name = headerName(value);
+    const name = authScheme(value);
     if (!isAuthTarget(target) || name === undefined) {
-      warnings.push(`${where}: "authHeader.${target}" must be a header name for one of ${AUTH_TARGETS.join(", ")}; ignored`);
+      warnings.push(`${where}: "authHeader.${target}" must be bearer, basic or a header name, for one of ${AUTH_TARGETS.join(", ")}; ignored`);
       continue;
     }
     overrides[target] = name;
@@ -381,6 +404,10 @@ export function parseProviderEntry(
     warnings.push(`${where}: literal "apiKey" is not supported; use "apiKeyEnv" or "tokenFile"; skipped`);
     return undefined;
   }
+  if (raw.password !== undefined) {
+    warnings.push(`${where}: literal "password" is not supported; use "passwordEnv" or "passwordFile"; skipped`);
+    return undefined;
+  }
   if (typeof raw.baseUrl !== "string") {
     warnings.push(`${where}: "baseUrl" is required; skipped`);
     return undefined;
@@ -409,6 +436,23 @@ export function parseProviderEntry(
   if (raw.apiKeyEnv !== undefined) {
     if (typeof raw.apiKeyEnv === "string" && ENV_NAME_RE.test(raw.apiKeyEnv)) config.apiKeyEnv = raw.apiKeyEnv;
     else warnings.push(`${where}: "apiKeyEnv" must be an environment variable name; ignored`);
+  }
+  if (raw.username !== undefined) {
+    if (isValidUsername(raw.username)) config.username = raw.username;
+    else warnings.push(`${where}: "username" must be 1-256 characters without ':' or control characters; ignored`);
+  }
+  for (const key of ["usernameEnv", "passwordEnv"] as const) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (typeof value === "string" && ENV_NAME_RE.test(value)) config[key] = value;
+    else warnings.push(`${where}: "${key}" must be an environment variable name; ignored`);
+  }
+  if (raw.passwordFile !== undefined) {
+    if (typeof raw.passwordFile === "string" && raw.passwordFile.trim() && !hasControlChars(raw.passwordFile)) {
+      config.passwordFile = expandHome(raw.passwordFile.trim(), home);
+    } else {
+      warnings.push(`${where}: "passwordFile" must be a path; ignored`);
+    }
   }
   if (raw.tokenFile !== undefined) {
     if (typeof raw.tokenFile === "string" && raw.tokenFile.trim() && !hasControlChars(raw.tokenFile)) {
@@ -509,6 +553,7 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
   const models = rawExtra ? parseExtraModelsEnv(rawExtra, warnings) : {};
 
   const tokenFile = env[ENV.tokenFile]?.trim();
+  const passwordFile = env[ENV.basicPasswordFile]?.trim();
   return {
     providers: [
       {
@@ -516,6 +561,9 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
         baseUrl,
         apiKeyEnv: ENV.apiKey,
         ...(tokenFile ? { tokenFile: expandHome(tokenFile, home) } : {}),
+        usernameEnv: ENV.basicUser,
+        passwordEnv: ENV.basicPassword,
+        ...(passwordFile ? { passwordFile: expandHome(passwordFile, home) } : {}),
         authHeaders,
         defaultApi,
         headers: {},
@@ -555,6 +603,9 @@ export function mergeProviders(
       baseUrl: provider.baseUrl,
       apiKeyEnv: provider.apiKeyEnv,
       tokenFile: provider.tokenFile ?? file.tokenFile,
+      usernameEnv: provider.usernameEnv,
+      passwordEnv: provider.passwordEnv,
+      passwordFile: provider.passwordFile ?? file.passwordFile,
       // Whether the variable was *supplied* decides, not its value: an explicit
       // INFERENCE_GATEWAY_DEFAULT_API=openai-responses must beat a file's openai-completions.
       defaultApi: envDefaultApiSet ? provider.defaultApi : file.defaultApi,
@@ -616,17 +667,115 @@ export async function loadConfig(deps: LoadConfigDeps = {}): Promise<ParseResult
       fromFile = { providers: parsed.providers, warnings: parsed.warnings.map((warning) => `${path}: ${warning}`) };
     }
   }
+  const merged = mergeProviders(fromEnv.providers, fromFile.providers, { envDefaultApiSet: fromEnv.defaultApiSet });
+  const bound = bindEnvCredentials(merged, env);
   return {
     path,
-    providers: mergeProviders(fromEnv.providers, fromFile.providers, { envDefaultApiSet: fromEnv.defaultApiSet }),
-    warnings: [...fromEnv.warnings, ...fromFile.warnings],
+    providers: bound.providers,
+    warnings: [...fromEnv.warnings, ...fromFile.warnings, ...bound.warnings],
   };
+}
+
+/** The `INFERENCE_GATEWAY_*` variables that carry credentials. */
+export const ENV_CREDENTIAL_VARS: readonly string[] = [ENV.apiKey, ENV.basicUser, ENV.basicPassword];
+
+/**
+ * Trusted-URL binding: credentials from `INFERENCE_GATEWAY_*` variables are meant for the gateway at
+ * `INFERENCE_GATEWAY_BASE_URL` and nowhere else. A provider that names one of those variables
+ * (`apiKeyEnv`, `usernameEnv`, `passwordEnv`) is kept only when its base URL equals that variable's
+ * (both normalised: scheme, host, port and path; trailing slash and `/v1` ignored). Anything else is
+ * refused with a warning and never registered, so no request carrying the credential is sent.
+ * The env provider itself always passes: its base URL *is* the variable.
+ */
+export function bindEnvCredentials(
+  providers: GatewayConfig[],
+  env: Record<string, string | undefined>,
+): ParseResult {
+  let trusted: string | undefined;
+  const rawBase = env[ENV.baseUrl]?.trim();
+  if (rawBase) {
+    try {
+      trusted = normalizeBaseUrl(rawBase);
+    } catch {
+      trusted = undefined;
+    }
+  }
+  const warnings: string[] = [];
+  const kept = providers.filter((provider) => {
+    const named = [provider.apiKeyEnv, provider.usernameEnv, provider.passwordEnv].filter(
+      (name): name is string => name !== undefined && ENV_CREDENTIAL_VARS.includes(name),
+    );
+    if (named.length === 0 || provider.baseUrl === trusted) return true;
+    warnings.push(
+      `${provider.id}: refused — it uses ${[...new Set(named)].join(", ")}, which only authenticate to ` +
+        `${ENV.baseUrl}${trusted ? ` (${trusted})` : " (unset)"}, but its baseUrl is ${provider.baseUrl}. ` +
+        `Use a variable of your own (apiKeyEnv/passwordEnv) for this gateway.`,
+    );
+    return false;
+  });
+  return { providers: kept, warnings };
 }
 
 /**
  * The token to send, read fresh: the token file (re-read every call, so rotated OIDC/WIF tokens are
  * picked up) wins over the API key variable. Undefined means "not configured".
  */
+function isValidUsername(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 && !value.includes(":") && !hasControlChars(value);
+}
+
+export interface GatewayCredentials {
+  token?: string;
+  basic?: { username: string; password: string };
+  /** Why a configured credential is unusable — never the credential itself. */
+  problems: string[];
+}
+
+/**
+ * Every credential the config can produce, read fresh (files are re-read each call): the token for
+ * Bearer / raw-header schemes, and the username/password pair for Basic. Undefined members are
+ * simply not configured.
+ */
+export async function resolveCredentials(
+  config: Pick<GatewayConfig, "apiKeyEnv" | "tokenFile" | "username" | "usernameEnv" | "passwordEnv" | "passwordFile">,
+  env: Record<string, string | undefined> = process.env,
+  readText: (path: string) => Promise<string | undefined> = readTextIfExists,
+): Promise<GatewayCredentials> {
+  const credentials: GatewayCredentials = { problems: [] };
+  const token = await resolveToken(config, env, readText);
+  if (token) credentials.token = token;
+
+  let password: string | undefined;
+  if (config.passwordFile) {
+    const text = (await readText(config.passwordFile))?.replace(/\r?\n$/, "");
+    if (text && !hasControlChars(text)) password = text;
+  } else if (config.passwordEnv) {
+    const value = env[config.passwordEnv];
+    if (value && !hasControlChars(value)) password = value;
+  }
+  if (password !== undefined) {
+    const fromEnv = config.usernameEnv ? env[config.usernameEnv]?.trim() : undefined;
+    const username = fromEnv || config.username || DEFAULT_BASIC_USERNAME;
+    if (isValidUsername(username)) credentials.basic = { username, password };
+    else credentials.problems.push("the Basic-auth username must not contain ':' or control characters");
+  }
+  return credentials;
+}
+
+/**
+ * The single auth header for `scheme`, or undefined when the credential it needs is not
+ * configured. `authorization` = Bearer token, `basic` = Basic user:password, else raw token.
+ */
+export function authHeaderEntry(scheme: string, credentials: GatewayCredentials): [string, string] | undefined {
+  if (scheme === "basic") {
+    if (!credentials.basic) return undefined;
+    const { username, password } = credentials.basic;
+    return ["authorization", `Basic ${Buffer.from(`${username}:${password}`, "utf8").toString("base64")}`];
+  }
+  if (!credentials.token) return undefined;
+  return scheme === "authorization" ? ["authorization", `Bearer ${credentials.token}`] : [scheme, credentials.token];
+}
+
 export async function resolveToken(
   config: Pick<GatewayConfig, "apiKeyEnv" | "tokenFile">,
   env: Record<string, string | undefined> = process.env,

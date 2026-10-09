@@ -14,7 +14,16 @@ import type {
   ProviderStreams,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { loadConfig, resolveToken, type GatewayApi, type GatewayConfig, type LoadConfigDeps } from "./config.ts";
+import {
+  authHeaderEntry,
+  authHeaderFor,
+  loadConfig,
+  resolveCredentials,
+  type GatewayApi,
+  type GatewayConfig,
+  type GatewayCredentials,
+  type LoadConfigDeps,
+} from "./config.ts";
 import { discoverModels, fallbackModels, rebindModels, type GatewayModel } from "./discovery.ts";
 
 export const LOG_PREFIX = "[pi-inference-gateway]";
@@ -36,38 +45,41 @@ export interface RuntimeDeps {
 
 // --- request fetch --------------------------------------------------------------------------
 
+/** Resolves the configured credentials; called per request so token and password files are re-read. */
+export type CredentialSource = () => Promise<GatewayCredentials>;
+
 /**
  * The `fetch` every inference request goes through. Two jobs:
  *
  * 1. **Never follow a redirect** (`redirect: "error"`). Fetch strips only `authorization` on a
  *    cross-origin redirect, so following one would hand `x-api-key` (or any custom credential
  *    header) to whatever host the gateway redirects to. pi's SDK clients use the default `"follow"`,
- *    and pi exposes no per-request redirect option, so the only hook is `options.fetch` — which is
- *    why every transport is wrapped, not just the ones with a header override.
- * 2. **Optionally move the token** to the configured header (`authorization` means
- *    `Bearer <token>`, anything else carries the raw token), removing both native auth headers
- *    first so exactly one leaves. Only when the config overrides that transport's header.
+ *    and pi exposes no per-request redirect option, so the only hook is `options.fetch`.
+ * 2. **Send exactly one auth header, chosen by `scheme`** (see `authHeaderFor`): both native auth
+ *    headers pi's SDKs set are removed, then the scheme's header is set from the configured
+ *    credentials — Bearer token, raw token in a named header, or Basic user:password. The key pi
+ *    passes as `apiKey` is therefore never what goes on the wire; with Basic it is a placeholder.
  *
  * `baseFetch` is resolved per call, not captured: `globalThis.fetch` is routinely replaced after
  * module load (proxy agents, test doubles, pi's own instrumentation).
  */
 export function createGatewayFetch({
-  authHeader,
-  token,
+  scheme,
+  credentials,
   baseFetch,
 }: {
-  authHeader?: string;
-  token: string | undefined;
+  scheme: string;
+  credentials: CredentialSource;
   baseFetch?: FetchFunction;
 }): FetchFunction {
   return async (input, init) => {
     const transport = baseFetch ?? globalThis.fetch;
-    if (authHeader === undefined || !token) return transport(input, { ...init, redirect: "error" });
     const headers = new Headers(input instanceof Request ? input.headers : undefined);
     new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
     headers.delete("authorization");
     headers.delete("x-api-key");
-    headers.set(authHeader, authHeader === "authorization" ? `Bearer ${token}` : token);
+    const entry = authHeaderEntry(scheme, await credentials());
+    if (entry) headers.set(entry[0], entry[1]);
     return transport(input, { ...init, headers, redirect: "error" });
   };
 }
@@ -78,35 +90,38 @@ export function createGatewayFetch({
  * *underneath*: it stays the transport that dials, and the rewrite runs first. The spread keeps
  * optional members a pi release may add to the lazy wrapper.
  */
-export function withGatewayFetch(base: ProviderStreams, authHeader: string | undefined): ProviderStreams {
-  const fetchFor = (apiKey: string | undefined, fetch: FetchFunction | undefined) =>
-    createGatewayFetch({ ...(authHeader !== undefined ? { authHeader } : {}), token: apiKey, ...(fetch ? { baseFetch: fetch } : {}) });
+export function withGatewayFetch(base: ProviderStreams, scheme: string, credentials: CredentialSource): ProviderStreams {
+  const fetchFor = (fetch: FetchFunction | undefined) =>
+    createGatewayFetch({ scheme, credentials, ...(fetch ? { baseFetch: fetch } : {}) });
   const wrapped: ProviderStreams = {
     ...base,
-    stream: (model, context, options) =>
-      base.stream(model, context, { ...options, fetch: fetchFor(options?.apiKey, options?.fetch) }),
+    stream: (model, context, options) => base.stream(model, context, { ...options, fetch: fetchFor(options?.fetch) }),
     streamSimple: (model, context, options) =>
-      base.streamSimple(model, context, { ...options, fetch: fetchFor(options?.apiKey, options?.fetch) }),
+      base.streamSimple(model, context, { ...options, fetch: fetchFor(options?.fetch) }),
   };
   const { fetchDeferred, cancelDeferred } = base;
   if (fetchDeferred) {
-    wrapped.fetchDeferred = (model, handle, options) =>
-      fetchDeferred(model, handle, { ...options, fetch: fetchFor(options?.apiKey, options?.fetch) });
+    wrapped.fetchDeferred = (model, handle, options) => fetchDeferred(model, handle, { ...options, fetch: fetchFor(options?.fetch) });
   }
   if (cancelDeferred) {
-    wrapped.cancelDeferred = (model, handle, options) =>
-      cancelDeferred(model, handle, { ...options, fetch: fetchFor(options?.apiKey, options?.fetch) });
+    wrapped.cancelDeferred = (model, handle, options) => cancelDeferred(model, handle, { ...options, fetch: fetchFor(options?.fetch) });
   }
   return wrapped;
 }
 
+/** Credentials for one gateway, resolved fresh from its config on every call. */
+export function credentialSource(config: GatewayConfig, deps: RuntimeDeps = {}): CredentialSource {
+  return () => resolveCredentials(config, deps.env ?? process.env, deps.readText);
+}
+
 /**
  * The `api` map: pi dispatches each model to the entry keyed by its `model.api`. Every transport is
- * wrapped (redirects are always refused); each keeps its native auth header (`x-api-key` for
- * Messages, Bearer for the OpenAI ones) unless the config overrides that transport's header.
+ * wrapped: redirects are refused, and the auth header follows that transport's scheme — native
+ * (`x-api-key` for Messages, Bearer for the OpenAI ones) unless the config overrides it.
  */
-export function gatewayStreams(config: Pick<GatewayConfig, "authHeaders">): Record<GatewayApi, ProviderStreams> {
-  const transport = (api: GatewayApi, base: ProviderStreams) => withGatewayFetch(base, config.authHeaders[api]);
+export function gatewayStreams(config: GatewayConfig, deps: RuntimeDeps = {}): Record<GatewayApi, ProviderStreams> {
+  const credentials = credentialSource(config, deps);
+  const transport = (api: GatewayApi, base: ProviderStreams) => withGatewayFetch(base, authHeaderFor(config, api), credentials);
   return {
     "anthropic-messages": transport("anthropic-messages", anthropicMessagesApi()),
     "openai-responses": transport("openai-responses", openAIResponsesApi()),
@@ -122,19 +137,24 @@ export function gatewayStreams(config: Pick<GatewayConfig, "authHeaders">): Reco
  * pi calls `resolve()` per request, so a token file is re-read every time.
  */
 export function gatewayAuth(config: GatewayConfig, deps: RuntimeDeps = {}): ApiKeyAuth {
-  let warnedMissing = false;
+  const warned = new Set<string>();
+  const warnOnce = (message: string) => {
+    if (warned.has(message)) return;
+    warned.add(message);
+    (deps.warn ?? console.warn)(`${LOG_PREFIX} ${config.id}: ${message}`);
+  };
   return {
     name: `Inference gateway (${config.id})`,
     async resolve(): Promise<AuthResult | undefined> {
-      const token = await resolveToken(config, deps.env ?? process.env, deps.readText);
-      if (!token) {
-        if (config.tokenFile && !warnedMissing) {
-          warnedMissing = true;
-          (deps.warn ?? console.warn)(`${LOG_PREFIX} ${config.id}: token file ${config.tokenFile} is missing or empty`);
-        }
-        return undefined;
-      }
-      return { auth: { apiKey: token }, source: config.tokenFile ?? config.apiKeyEnv };
+      const credentials = await resolveCredentials(config, deps.env ?? process.env, deps.readText);
+      for (const problem of credentials.problems) warnOnce(problem);
+      if (!credentials.token && config.tokenFile) warnOnce(`token file ${config.tokenFile} is missing or empty`);
+      if (!credentials.token && !credentials.basic) return undefined;
+      // pi needs a non-empty apiKey to dispatch a request; the request fetch replaces whatever the
+      // SDK makes of it with the configured scheme's header, so with Basic only a placeholder is passed.
+      return credentials.token
+        ? { auth: { apiKey: credentials.token }, source: config.tokenFile ?? config.apiKeyEnv }
+        : { auth: { apiKey: "basic-auth" }, source: config.passwordFile ?? config.passwordEnv };
     },
   };
 }
@@ -156,7 +176,7 @@ export function gatewayProviderOptions(
     baseUrl: config.baseUrl,
     auth: { apiKey: gatewayAuth(config, deps) },
     models,
-    api: gatewayStreams(config),
+    api: gatewayStreams(config, deps),
   };
 }
 
@@ -202,7 +222,7 @@ export function createGatewayProvider(
     }
     if (!context.allowNetwork || context.signal.aborted) return;
     const fetched = await discoverModels(config, {
-      token: await resolveToken(config, deps.env ?? process.env, deps.readText),
+      credentials: await resolveCredentials(config, deps.env ?? process.env, deps.readText),
       signal: context.signal,
       ...(deps.fetch ? { fetch: deps.fetch } : {}),
     });
@@ -231,9 +251,9 @@ export async function initialModels(
   timeoutMs: number = FACTORY_DISCOVERY_TIMEOUT_MS,
 ): Promise<{ models: GatewayModel[]; fresh: boolean }> {
   try {
-    const token = await resolveToken(config, deps.env ?? process.env, deps.readText);
+    const credentials = await resolveCredentials(config, deps.env ?? process.env, deps.readText);
     const models = await discoverModels(config, {
-      token,
+      credentials,
       timeoutMs,
       ...(deps.fetch ? { fetch: deps.fetch } : {}),
     });

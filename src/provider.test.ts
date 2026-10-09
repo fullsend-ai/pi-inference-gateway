@@ -91,45 +91,70 @@ function providerModel(provider: Provider<GatewayApi>, id: string): Model<Gatewa
 
 describe("createGatewayFetch", () => {
   const capture = () => {
-    const seen: Headers[] = [];
+    const seen: Array<{ headers: Headers; redirect: RequestRedirect | undefined }> = [];
     const baseFetch: FetchFunction = async (input, init) => {
-      seen.push(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
+      seen.push({ headers: new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)), redirect: init?.redirect });
       return new Response("{}");
     };
     return { seen, baseFetch };
   };
+  const token = async () => ({ token: "tok", problems: [] });
+  const basic = async () => ({ basic: { username: "gateway", password: "test-pass" }, problems: [] }); // gitleaks:allow (test fixture)
 
-  it("moves an x-api-key token to authorization: Bearer", async () => {
+  it("Bearer: replaces x-api-key with authorization: Bearer", async () => {
     const { seen, baseFetch } = capture();
-    const fetch = createGatewayFetch({ authHeader: "authorization", token: "tok", baseFetch });
+    const fetch = createGatewayFetch({ scheme: "authorization", credentials: token, baseFetch });
     await fetch("https://gw.example.com/v1/messages", { method: "POST", headers: { "x-api-key": "tok", "x-other": "1" } });
-    assert.equal(seen[0].get("authorization"), "Bearer tok");
-    assert.equal(seen[0].has("x-api-key"), false);
-    assert.equal(seen[0].get("x-other"), "1", "unrelated headers survive");
+    assert.equal(seen[0].headers.get("authorization"), "Bearer tok");
+    assert.equal(seen[0].headers.has("x-api-key"), false);
+    assert.equal(seen[0].headers.get("x-other"), "1", "unrelated headers survive");
+    assert.equal(seen[0].redirect, "error");
   });
 
-  it("moves a Bearer token to a custom header", async () => {
+  it("raw header: replaces a Bearer token with x-api-key", async () => {
     const { seen, baseFetch } = capture();
-    const fetch = createGatewayFetch({ authHeader: "x-api-key", token: "tok", baseFetch });
+    const fetch = createGatewayFetch({ scheme: "x-api-key", credentials: token, baseFetch });
     await fetch("https://gw.example.com/v1/responses", { headers: { authorization: "Bearer tok" } });
-    assert.equal(seen[0].get("x-api-key"), "tok");
-    assert.equal(seen[0].has("authorization"), false);
+    assert.equal(seen[0].headers.get("x-api-key"), "tok");
+    assert.equal(seen[0].headers.has("authorization"), false);
+  });
+
+  it("Basic: sends exactly base64(username:password)", async () => {
+    const { seen, baseFetch } = capture();
+    const fetch = createGatewayFetch({ scheme: "basic", credentials: basic, baseFetch });
+    await fetch("https://gw.example.com/v1/chat/completions", { headers: { authorization: "Bearer basic-auth", "x-api-key": "basic-auth" } });
+    assert.equal(seen[0].headers.get("authorization"), "Basic Z2F0ZXdheTp0ZXN0LXBhc3M=");
+    assert.equal(seen[0].headers.has("x-api-key"), false);
   });
 
   it("reads headers from a Request input", async () => {
     const { seen, baseFetch } = capture();
-    const fetch = createGatewayFetch({ authHeader: "authorization", token: "tok", baseFetch });
+    const fetch = createGatewayFetch({ scheme: "authorization", credentials: token, baseFetch });
     await fetch(new Request("https://gw.example.com/x", { headers: { "x-api-key": "tok", "x-keep": "y" } }));
-    assert.equal(seen[0].get("authorization"), "Bearer tok");
-    assert.equal(seen[0].get("x-keep"), "y");
-    assert.equal(seen[0].has("x-api-key"), false);
+    assert.equal(seen[0].headers.get("authorization"), "Bearer tok");
+    assert.equal(seen[0].headers.get("x-keep"), "y");
+    assert.equal(seen[0].headers.has("x-api-key"), false);
   });
 
-  it("passes the request through untouched without a token", async () => {
+  it("sends no auth header when the scheme's credential is not configured", async () => {
     const { seen, baseFetch } = capture();
-    const fetch = createGatewayFetch({ authHeader: "authorization", token: undefined, baseFetch });
-    await fetch("https://gw.example.com/x", { headers: { "x-api-key": "k" } });
-    assert.equal(seen[0].get("x-api-key"), "k");
+    const fetch = createGatewayFetch({ scheme: "basic", credentials: token, baseFetch });
+    await fetch("https://gw.example.com/x", { headers: { "x-api-key": "tok", authorization: "Bearer tok" } });
+    assert.equal(seen[0].headers.has("authorization"), false);
+    assert.equal(seen[0].headers.has("x-api-key"), false);
+  });
+
+  it("re-resolves credentials on every request", async () => {
+    const { seen, baseFetch } = capture();
+    let current = "t1";
+    const fetch = createGatewayFetch({ scheme: "authorization", credentials: async () => ({ token: current, problems: [] }), baseFetch });
+    await fetch("https://gw.example.com/x");
+    current = "t2";
+    await fetch("https://gw.example.com/x");
+    assert.deepEqual(
+      seen.map((entry) => entry.headers.get("authorization")),
+      ["Bearer t1", "Bearer t2"],
+    );
   });
 });
 
@@ -264,6 +289,49 @@ describe("one open-weight model routed through every API, with reasoning", () =>
       assertOneAuthHeader(calls[0].headers, NATIVE[api]);
     });
   }
+});
+
+describe("Basic auth end to end (Praxis-style)", () => {
+  const BASIC = { GW_USER: "gateway", GW_PASS: "test-pass" };
+  const basicConfig = (authHeaders: GatewayConfig["authHeaders"]) =>
+    config({ apiKeyEnv: undefined, usernameEnv: "GW_USER", passwordEnv: "GW_PASS", authHeaders });
+
+  for (const [id, api] of MODELS) {
+    it(`${api}: authHeader basic sends exactly one Basic header`, async () => {
+      const cfg = basicConfig({ "anthropic-messages": "basic", "openai-responses": "basic", "openai-completions": "basic" });
+      const provider = createProvider(gatewayProviderOptions(cfg, MODELS.map(([modelId, modelApi]) => model(modelId, modelApi, cfg)), { env: BASIC }));
+      const auth = await provider.auth.apiKey?.resolve({ ctx: { env: async () => undefined, fileExists: async () => false }, signal: new AbortController().signal });
+      assert.ok(auth?.auth.apiKey, "configured by the password alone");
+      const { calls, fetch } = recorder();
+      const message = await provider.streamSimple(providerModel(provider, id), CONTEXT, { apiKey: auth.auth.apiKey, fetch }).result();
+      assert.equal(message.stopReason, "stop", message.errorMessage ?? "");
+      assert.equal(calls[0].url.pathname, PATHS[api]);
+      assert.equal(calls[0].headers.get("authorization"), "Basic Z2F0ZXdheTp0ZXN0LXBhc3M=");
+      assert.equal(calls[0].headers.has("x-api-key"), false);
+    });
+  }
+
+  it("mixes schemes per API: Basic on Messages, Bearer elsewhere", async () => {
+    const cfg = config({ usernameEnv: "GW_USER", passwordEnv: "GW_PASS", authHeaders: { "anthropic-messages": "basic" } });
+    const provider = createProvider(gatewayProviderOptions(cfg, MODELS.map(([modelId, modelApi]) => model(modelId, modelApi, cfg)), { env: { ...BASIC, GW_KEY: "tok" } }));
+    const claude = recorder();
+    await provider.streamSimple(providerModel(provider, "test-claude"), CONTEXT, { apiKey: "tok", fetch: claude.fetch }).result();
+    assert.equal(claude.calls[0].headers.get("authorization"), "Basic Z2F0ZXdheTp0ZXN0LXBhc3M=");
+    const gpt = recorder();
+    await provider.streamSimple(providerModel(provider, "test-gpt"), CONTEXT, { apiKey: "tok", fetch: gpt.fetch }).result();
+    assertOneAuthHeader(gpt.calls[0].headers, "authorization");
+  });
+
+  it("never logs the password, and refuses a username with ':'", async () => {
+    const warnings: string[] = [];
+    const cfg = config({ apiKeyEnv: undefined, usernameEnv: "GW_USER", passwordEnv: "GW_PASS" });
+    const auth = gatewayAuth(cfg, { env: { GW_USER: "a:b", GW_PASS: "s3cret-value" }, warn: (message) => warnings.push(message) });
+    const ctx = { env: async () => undefined, fileExists: async () => false };
+    assert.equal(await auth.resolve({ ctx, signal: new AbortController().signal }), undefined);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /username must not contain ':'/);
+    assert.equal(warnings.join().includes("s3cret-value") || warnings.join().includes("a:b"), false);
+  });
 });
 
 describe("gatewayAuth", () => {
