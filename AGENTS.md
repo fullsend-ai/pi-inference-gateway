@@ -62,7 +62,7 @@ npm run ci
   strips a vendor prefix.
 - **No dependency-specific workarounds in code.** A gateway, backend or pi-transport problem is
   handled by config the user sets (`compat`, `thinkingLevelMap`, `contextWindow`, `maxTokens`,
-  `authHeader` per model or API), a README troubleshooting entry, and an upstream issue to the
+  `authHeader` per model or API), a `docs/troubleshooting.md` entry, and an upstream issue to the
   dependency that owns the bug. No branch keyed on a vendor, model id or backend unless it routes or
   describes models; record every such branch in PLAN.md, "Generality audit".
 - **Sanitise everything from the wire** — see `LIMITS` in `src/discovery.ts`. Never follow a redirect

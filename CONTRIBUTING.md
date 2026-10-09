@@ -28,6 +28,7 @@ by.
 │   ├── test-fixtures.ts    # canned SSE per transport, shared with the mock gateway
 │   └── *.test.ts           # node --test; no network, no pi process (regressions.test.ts: review fixes)
 ├── scripts/mock-gateway.mjs  # local path-routed gateway for end-to-end runs
+├── docs/                   # user reference, one topic per page; README.md is the landing page
 └── .github/workflows/      # ci.yml (pi matrix), release.yml (tag → release with tarball digest)
 ```
 
@@ -97,7 +98,7 @@ while pointing somewhere other than `INFERENCE_GATEWAY_BASE_URL`, before anythin
 
 ### Transport selection and metadata
 
-See README, "How each model gets its API", for the order. Two points behind it:
+See [How each model gets its API](docs/routing.md#how-each-model-gets-its-api) for the order. Two points behind it:
 
 - **Hosting owners are no signal.** A proxy reports `owned_by: "vertex"` for Claude and Gemini
   alike, so `AMBIGUOUS_OWNERS` are skipped.
@@ -117,7 +118,7 @@ ids sent as a `fallbacks` body field, and a gateway has its own ids and routing.
 
 **No dependency-specific workarounds in code.** When a gateway, backend or pi transport rejects
 something, the fix is config the user sets (`compat`, `thinkingLevelMap`, `contextWindow`,
-`maxTokens`, `authHeader`), a README troubleshooting entry, and an issue to the project that owns
+`maxTokens`, `authHeader`), a [troubleshooting](docs/troubleshooting.md) entry, and an issue to the project that owns
 the bug. Routing heuristics (endpoint hints, owners, pi's catalog, the `claude-` id) describe models
 and stay. PLAN.md, "Generality audit", lists every vendor-, id- or backend-specific branch.
 
@@ -173,6 +174,27 @@ expectations rather than ours:
 3. Catalog tests run against the **real** `getBuiltinModels()` output, so they keep asserting
    something true after a pi bump.
 
+`docs.test.ts` checks every relative link and `#anchor` in README.md, CONTRIBUTING.md, AGENTS.md,
+PLAN.md and `docs/` against GitHub-style heading slugs, keeps README.md short, and requires every
+`docs/` page in the README's "Next steps" table.
+
+## Try it locally
+
+```bash
+node scripts/mock-gateway.mjs 47811 &
+export PI_CODING_AGENT_DIR=$(mktemp -d)          # keep your real ~/.pi untouched
+export INFERENCE_GATEWAY_BASE_URL=http://127.0.0.1:47811
+export INFERENCE_GATEWAY_API_KEY=test-token
+pi -ne -e . --list-models
+```
+
+(`-ne -e .` loads only this checkout's extension; a normal `pi install` needs neither flag.) The mock
+lists a Claude and a Gemini model, accepts only `x-api-key` on `/v1/messages`, and serves the unlisted
+`gpt-*` and `oss/zai-org/glm-5-3` models described in
+[Models the gateway does not list](docs/configuration.md#models-the-gateway-does-not-list). Start it with `--auth basic` to require
+`Basic gateway:test-pass` on every path instead (see [Praxis](docs/gateways/praxis.md)), or with `--mode agentgateway` for Bearer everywhere
+and body-routed models (see [agentgateway](docs/gateways/agentgateway.md)).
+
 ## Local end-to-end
 
 ```bash
@@ -196,7 +218,7 @@ The mock logs `<method> <path> auth=<header names> model=<id>` per request. Repe
 `INFERENCE_GATEWAY_BASIC_PASSWORD=test-pass` (Praxis's documented setup), and with
 `node scripts/mock-gateway.mjs 47813 --mode agentgateway` and `INFERENCE_GATEWAY_AUTH_HEADER=bearer`
 (Bearer on every path, a synthesised `owned_by: "openai"` list with an `openai/*` wildcard, routing
-by body `model`, text/plain 400/401 errors; see README, "agentgateway"). Run the same against the
+by body `model`, text/plain 400/401 errors; see [agentgateway](docs/gateways/agentgateway.md)). Run the same against the
 oldest pi in the matrix:
 
 ```bash
