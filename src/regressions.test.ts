@@ -76,6 +76,28 @@ describe("review 5: config model ids are validated like gateway ids", () => {
   });
 });
 
+describe("review 6: an explicit INFERENCE_GATEWAY_DEFAULT_API wins over the file", () => {
+  const file = JSON.stringify({ providers: { gateway: { baseUrl: "https://gw.example.com", defaultApi: "openai-completions" } } });
+
+  it("explicit env value equal to the built-in default still wins", async () => {
+    const { providers } = await loadConfig({
+      env: { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com", INFERENCE_GATEWAY_DEFAULT_API: "openai-responses" },
+      home: "/home/user",
+      readText: async () => file,
+    });
+    assert.equal(providers[0].defaultApi, "openai-responses");
+  });
+
+  it("unset env value leaves the file's", async () => {
+    const { providers } = await loadConfig({
+      env: { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com" },
+      home: "/home/user",
+      readText: async () => file,
+    });
+    assert.equal(providers[0].defaultApi, "openai-completions");
+  });
+});
+
 describe("review 8: model ids that are Object.prototype names cannot corrupt config dicts", () => {
   it("keeps __proto__ as an ordinary own key", () => {
     const { providers } = parseConfigFile(

@@ -62,8 +62,8 @@ describe("agentDir / expandHome", () => {
 
 describe("envProvider", () => {
   it("is disabled without a base URL", () => {
-    assert.deepEqual(envProvider({}, HOME), { providers: [], warnings: [] });
-    assert.deepEqual(envProvider({ INFERENCE_GATEWAY_BASE_URL: " " }, HOME), { providers: [], warnings: [] });
+    assert.deepEqual(envProvider({}, HOME), { providers: [], warnings: [], defaultApiSet: false });
+    assert.deepEqual(envProvider({ INFERENCE_GATEWAY_BASE_URL: " " }, HOME), { providers: [], warnings: [], defaultApiSet: false });
   });
 
   it("builds the default provider, referencing the key by variable name", () => {
@@ -322,10 +322,12 @@ describe("extra models", () => {
 
 describe("mergeProviders", () => {
   it("lets the environment supply the connection and the file everything else", () => {
-    const fromEnv = envProvider(
+    const env = envProvider(
       { INFERENCE_GATEWAY_BASE_URL: "https://env.example.com", INFERENCE_GATEWAY_DEFAULT_API: "anthropic-messages" },
       HOME,
-    ).providers;
+    );
+    assert.equal(env.defaultApiSet, true);
+    const fromEnv = env.providers;
     const fromFile = parseConfigFile(
       {
         providers: {
@@ -340,7 +342,7 @@ describe("mergeProviders", () => {
       },
       HOME,
     ).providers;
-    const merged = mergeProviders(fromEnv, fromFile);
+    const merged = mergeProviders(fromEnv, fromFile, { envDefaultApiSet: env.defaultApiSet });
     assert.deepEqual(
       merged.map((provider) => provider.id),
       ["gateway", "other"],

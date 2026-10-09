@@ -435,17 +435,22 @@ export function parseConfigFile(json: unknown, home: string): ParseResult {
  * The provider described by the environment, or undefined when `INFERENCE_GATEWAY_BASE_URL` is
  * unset. The API key is referenced by variable name, never copied, so it is read at request time.
  */
-export function envProvider(env: Record<string, string | undefined>, home: string): ParseResult {
+export interface EnvParseResult extends ParseResult {
+  /** INFERENCE_GATEWAY_DEFAULT_API was set (and valid) — even to the built-in default value. */
+  defaultApiSet: boolean;
+}
+
+export function envProvider(env: Record<string, string | undefined>, home: string): EnvParseResult {
   const warnings: string[] = [];
   const rawBase = env[ENV.baseUrl]?.trim();
-  if (!rawBase) return { providers: [], warnings };
+  if (!rawBase) return { providers: [], warnings, defaultApiSet: false };
 
   let baseUrl: string;
   try {
     baseUrl = normalizeBaseUrl(rawBase);
   } catch (error) {
     warnings.push(`${ENV.baseUrl}: ${error instanceof Error ? error.message : String(error)}`);
-    return { providers: [], warnings };
+    return { providers: [], warnings, defaultApiSet: false };
   }
 
   let id = DEFAULT_PROVIDER_ID;
@@ -456,9 +461,13 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
   }
 
   let defaultApi = DEFAULT_API;
+  let defaultApiSet = false;
   const rawApi = env[ENV.defaultApi]?.trim();
   if (rawApi) {
-    if (isGatewayApi(rawApi)) defaultApi = rawApi;
+    if (isGatewayApi(rawApi)) {
+      defaultApi = rawApi;
+      defaultApiSet = true;
+    }
     else warnings.push(`${ENV.defaultApi}: must be one of ${GATEWAY_APIS.join(", ")}; using ${DEFAULT_API}`);
   }
 
@@ -486,6 +495,7 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
       },
     ],
     warnings,
+    defaultApiSet,
   };
 }
 
@@ -495,7 +505,11 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
  * keeps everything else (headers, filters, fallback models). Auth-header overrides and models are
  * merged per key; for a model both name, the file's fields win over the env's bare `id=api`.
  */
-export function mergeProviders(fromEnv: GatewayConfig[], fromFile: GatewayConfig[]): GatewayConfig[] {
+export function mergeProviders(
+  fromEnv: GatewayConfig[],
+  fromFile: GatewayConfig[],
+  { envDefaultApiSet = false }: { envDefaultApiSet?: boolean } = {},
+): GatewayConfig[] {
   const merged = new Map<string, GatewayConfig>();
   for (const provider of fromFile) merged.set(provider.id, provider);
   for (const provider of fromEnv) {
@@ -509,7 +523,9 @@ export function mergeProviders(fromEnv: GatewayConfig[], fromFile: GatewayConfig
       baseUrl: provider.baseUrl,
       apiKeyEnv: provider.apiKeyEnv,
       tokenFile: provider.tokenFile ?? file.tokenFile,
-      defaultApi: provider.defaultApi === DEFAULT_API ? file.defaultApi : provider.defaultApi,
+      // Whether the variable was *supplied* decides, not its value: an explicit
+      // INFERENCE_GATEWAY_DEFAULT_API=openai-responses must beat a file's openai-completions.
+      defaultApi: envDefaultApiSet ? provider.defaultApi : file.defaultApi,
       authHeaders: { ...file.authHeaders, ...provider.authHeaders },
       models: Object.fromEntries(
         [...new Set([...Object.keys(provider.models), ...Object.keys(file.models)])].map((modelId) => [
@@ -570,7 +586,7 @@ export async function loadConfig(deps: LoadConfigDeps = {}): Promise<ParseResult
   }
   return {
     path,
-    providers: mergeProviders(fromEnv.providers, fromFile.providers),
+    providers: mergeProviders(fromEnv.providers, fromFile.providers, { envDefaultApiSet: fromEnv.defaultApiSet }),
     warnings: [...fromEnv.warnings, ...fromFile.warnings],
   };
 }
