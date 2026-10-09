@@ -1,0 +1,45 @@
+{
+  "name": "@fullsend-ai/pi-inference-gateway",
+  "version": "0.1.0",
+  "description": "Any OpenAI- or Anthropic-compatible inference gateway (LiteLLM, agentgateway, ...) as one pi provider",
+  "type": "module",
+  "main": "src/index.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fullsend-ai/pi-inference-gateway.git"
+  },
+  "homepage": "https://github.com/fullsend-ai/pi-inference-gateway#readme",
+  "bugs": {
+    "url": "https://github.com/fullsend-ai/pi-inference-gateway/issues"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test src/*.test.ts",
+    "lint": "tsc --noEmit",
+    "ci": "npm run lint && npm run test"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.99.2",
+    "@earendil-works/pi-coding-agent": "0.99.2",
+    "@types/node": "26.4.1",
+    "typescript": "6.0.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.99.2",
+    "@earendil-works/pi-coding-agent": ">=0.99.2"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "inference-gateway",
+    "litellm",
+    "agentgateway",
+    "openai",
+    "anthropic"
+  ],
+  "license": "MIT"
+}

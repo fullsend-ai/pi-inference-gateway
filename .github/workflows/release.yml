@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+
+      # Never cut a release from a tree that does not lint and test.
+      - run: npm ci
+      - run: npm run ci
+
+      - name: Compute release tarball SHA256
+        id: sha
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          # The tag archive is what pinned consumers fetch (a sandbox Containerfile downloads it and
+          # verifies this digest), so publish it in the notes rather than making everyone derive it.
+          for attempt in 1 2 3 4 5; do
+            if SHA=$(curl -fsSL --retry 3 "$URL" | sha256sum | cut -d' ' -f1) && [ -n "$SHA" ]; then
+              break
+            fi
+            echo "archive not ready yet (attempt $attempt), retrying" >&2
+            sleep 10
+          done
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ steps.sha.outputs.sha }}
+          URL: ${{ steps.sha.outputs.url }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          \`\`\`bash
+          pi install git:github.com/${GITHUB_REPOSITORY}
+          export INFERENCE_GATEWAY_BASE_URL=https://your-gateway.example.com
+          export INFERENCE_GATEWAY_API_KEY=your-gateway-key
+          pi --list-models | grep gateway
+          pi --model gateway/<model-id> "your prompt"
+          \`\`\`
+
+          **For pinned/vendored consumers**
+
+          | | |
+          |---|---|
+          | Tarball | \`${URL}\` |
+          | SHA256 | \`${SHA}\` |
+
+          EOF
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md --generate-notes

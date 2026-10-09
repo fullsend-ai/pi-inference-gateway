@@ -1,0 +1,156 @@
+# pi-inference-gateway — implementation plan
+
+Target repo: `fullsend-ai/pi-inference-gateway` (public; not created yet — local only until the user OKs it).
+Package: `@fullsend-ai/pi-inference-gateway`. Sibling of `fullsend-ai/pi-anthropic-vertex` and
+`fullsend-ai/pi-xai-vertex`; same layout, CI matrix, release flow and rules.
+
+## Goal
+
+One pi provider extension for any vendor-neutral inference gateway (LiteLLM, agentgateway, Bifrost,
+Portkey, NewAPI, Cloudflare/Vercel AI Gateway, an in-house proxy …) that:
+
+1. discovers its models from `GET {baseUrl}/v1/models` (OpenAI list shape `{data:[{id,…}]}`, also
+   `{models:[…]}` and a bare array);
+2. routes **each model** to the right pi transport — `anthropic-messages` (`/v1/messages`),
+   `openai-responses` (`/v1/responses`) or `openai-completions` (`/v1/chat/completions`) — from a
+   single provider entry;
+3. fills model metadata (context window, max output, reasoning, image input, cost) from the
+   gateway's own fields first, then pi's **built-in catalog** (no third-party catalog fetch);
+4. never re-implements a protocol: pi's own lazy transports from `@earendil-works/pi-ai/compat`
+   do the streaming.
+
+Non-goals (v0.1): OAuth/`/login` flows, image/embedding models, Ollama native API, Gemini API,
+quota/cost dashboards, model routing/fallback across gateways.
+
+## Name
+
+`pi-inference-gateway` — neutral (no product name), says what it talks to, free on npm, and the
+`pi-<thing>` form matches the siblings. Default provider id `gateway`, so a model spec reads
+`gateway/claude-sonnet-5` or `gateway/gpt-6-luna`.
+
+## Configuration
+
+Two sources, env first so a sandbox needs no file (fullsend runtime is env-driven):
+
+| Env | Meaning |
+|---|---|
+| `INFERENCE_GATEWAY_BASE_URL` | Gateway root, with or without trailing `/v1`. Unset ⇒ env provider disabled. |
+| `INFERENCE_GATEWAY_API_KEY` | Static bearer token. |
+| `INFERENCE_GATEWAY_TOKEN_FILE` | Path re-read on each request (rotating OIDC/WIF tokens). Wins over `API_KEY`. |
+| `INFERENCE_GATEWAY_PROVIDER_ID` | Provider id, default `gateway`. |
+| `INFERENCE_GATEWAY_DEFAULT_API` | Fallback transport, default `openai-responses`. |
+
+Optional file `~/.pi/agent/inference-gateway.json` (honours `PI_CODING_AGENT_DIR`) for several
+gateways or per-model overrides:
+
+```json
+{
+  "providers": {
+    "gateway": {
+      "baseUrl": "https://gw.example.com",
+      "apiKeyEnv": "GW_KEY",            // or "tokenFile": "~/.config/gw/token"; never a literal key in examples
+      "authHeader": "authorization",    // or "x-api-key"; default: authorization Bearer for all APIs
+      "defaultApi": "openai-responses",
+      "headers": { "x-team": "fullsend" },
+      "modelsPath": "/v1/models",
+      "include": ["claude-*", "gpt-*"], "exclude": ["*embed*"],
+      "models": { "claude-sonnet-5": { "api": "anthropic-messages", "contextWindow": 1000000 } }
+    }
+  }
+}
+```
+
+No `!command` keys, no shell-out (sibling rule). No literal secrets in docs/tests.
+
+## Per-model API selection (first match wins)
+
+1. Config `models[id].api`.
+2. Gateway hint on the model object: `api`, `endpoint`/`inference_endpoint`, or
+   `supported_endpoints`/`endpoints` containing `/v1/messages` | `/v1/responses` | `/v1/chat/completions`
+   (prefer messages for Anthropic owners, else responses, else chat).
+3. Owner: `owned_by` / `provider` / `litellm_provider` ∈ {anthropic, vertex_ai-anthropic…} ⇒
+   `anthropic-messages`; `openai`/`azure` ⇒ `openai-responses`.
+4. pi built-in catalog: same id (or id after stripping a `vendor/` prefix) found under pi's
+   `anthropic` provider ⇒ `anthropic-messages`; under `openai` ⇒ `openai-responses`.
+5. `defaultApi`.
+
+Base URL per transport is derived from one `baseUrl`: OpenAI transports get `…/v1`, Anthropic gets
+the root (its SDK appends `/v1/messages`).
+
+## Metadata resolution (per field, first defined wins)
+
+config override → gateway fields (`context_window`, `context_length`, `max_input_tokens`,
+`max_output_tokens`, `max_tokens`, `supports_reasoning`, `supports_vision`, `input_modalities`,
+LiteLLM-style `input_cost_per_token`…) → pi built-in model with the same id (copy
+`contextWindow`, `maxTokens`, `reasoning`, `thinkingLevelMap`, `input`, `cost`, `compat`) →
+safe defaults (128k / 16k, text only, no reasoning, zero cost).
+
+Sanitise everything from the wire: id length ≤ 256, no control chars, positive bounded integers,
+cap list at 1000 models, response body ≤ 1 MiB, 10 s timeout, `redirect: "error"`.
+
+## Spike findings (2026-10-09)
+
+- fullsend sandbox pins **pi 0.99.2** (fullsend main `images/sandbox/Containerfile`); latest is 1.1.0
+  (local dev pi is 1.0.2). Sibling repo's 0.87.1 matrix is stale. Target peers `>=0.99.2`, CI
+  matrix `["0.99.2", "1.1.0"]`.
+- `CreateProviderOptions` is identical on 0.99.2 and 1.1.0: `api` may be a **map keyed by
+  `model.api`** (mixed-API provider in one registration), `models` = static baseline,
+  `fetchModels(ctx)` = dynamic overlay that createProvider restores/persists itself.
+- Transport factories on `@earendil-works/pi-ai/compat`: `anthropicMessagesApi`,
+  `openAIResponsesApi`, `openAICompletionsApi` (note the casing).
+- pi only refreshes catalogs **from the network** in interactive (after TUI start) and RPC modes;
+  `--list-models` and `-p` refresh with `allowNetwork: false` (cache only). fullsend runs `pi -p`, so
+  relying on `fetchModels` alone leaves a fresh sandbox with **no models**. Therefore: do discovery
+  inside the async extension factory (pi awaits async factories before startup) with a short
+  timeout, pass the result as static `models`, and keep `fetchModels` for interactive refreshes.
+  On factory-time failure fall back to the last persisted snapshot, then to config `fallbackModels`.
+- `auth.apiKey` = `ApiKeyAuth { name, resolve({ctx, credential, signal}) → AuthResult | undefined,
+  check? }`; no `login` ⇒ ambient-only. A spike with an ill-typed auth was silently skipped — type
+  it properly, never `as any`.
+- pi's Anthropic transport sends `x-api-key`; a Bearer-only gateway would 401 Claude while GPT
+  works. Inject a `fetch`/header transform for `anthropic-messages` models that moves the token to
+  `authorization: Bearer` when `authHeader` is `authorization` (pattern: sibling
+  `createVertexFetch`). Unit-test it explicitly.
+- `vendor/model` ids from the gateway are sent back **verbatim**; only the pi-catalog lookup strips
+  the prefix.
+
+## pi integration
+
+- `createProvider()` from `@earendil-works/pi-ai` with `auth.apiKey` (ambient, **no** `login`,
+  never `oauth`); `resolve()` returns the token (file re-read each call) or reports unconfigured.
+- Dynamic provider: `getModels()` returns the last list; `refreshModels(ctx)` restores
+  `ctx.stored`, fetches when `ctx.allowNetwork`, publishes `{ persist, update }` so startup works
+  offline from the last snapshot, keeps the old list on failure, honours `ctx.signal`.
+- Streams: dispatch on `model.api` to `anthropicMessagesApi()`, `openaiResponsesApi()`,
+  `openaiCompletionsApi()` from `/compat` (check the exact names in the installed `.d.ts`).
+- Import only allowlisted specifiers; `import type` for `ExtensionAPI`; erasable TS only; no `any`,
+  no casts at `createProvider()`; zero runtime dependencies.
+- Command `/gateway-refresh` (force refresh) if the ExtensionAPI exposes a refresh hook; otherwise
+  rely on pi's own refresh.
+
+## Layout (mirrors pi-anthropic-vertex)
+
+```
+package.json  tsconfig.json  .gitignore  LICENSE (MIT)  README.md  CONTRIBUTING.md  AGENTS.md  CLAUDE.md
+src/config.ts      env + file parsing, validation
+src/discovery.ts   fetch /v1/models, parse + sanitise, metadata merge, API selection
+src/provider.ts    createProvider wiring, auth, refresh/publish, stream dispatch
+src/index.ts       thin default export
+src/*.test.ts      node --test, no network (stub fetch), no pi process
+.github/workflows/ci.yml       matrix pi 0.99.2 + 1.1.0, stable `ci` aggregate job
+.github/workflows/release.yml  tag → GitHub release with tarball sha256 (copy sibling)
+```
+
+## Phases
+
+1. **Scaffold** — repo files, package.json (peers `>=0.99.2`), tsconfig, CI copied from sibling.
+2. **Config + discovery** — pure functions + unit tests (shapes: OpenAI, LiteLLM, agentgateway,
+   bare array; auth headers; redirects/oversize/timeouts rejected).
+3. **Provider** — createProvider, auth resolve, refresh/publish/persist, stream dispatch; tests
+   with a stub fetch asserting each transport hits the right URL with the right auth header.
+4. **Local end-to-end** — tiny local mock gateway (node http) serving `/v1/models`,
+   `/v1/messages`, `/v1/responses` SSE; `pi -ne -e . --list-models` and one `pi -p` per API on
+   pi 0.99.2 and 1.x.
+5. **Live gateway** — user-provided instance: list models, one prompt per transport, tool call,
+   thinking. Record results (no host names or tokens in the repo).
+6. **Publish** — on user OK: create `fullsend-ai/pi-inference-gateway`, push, tag `v0.1.0`.

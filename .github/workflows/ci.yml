@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 0.99.2 is fullsend's sandbox image pin (images/sandbox/Containerfile ARG PI_VERSION);
+        # 1.1.0 is the latest pi release. This matrix is the compatibility check: the extension
+        # mirrors no pi internals, so a pi release can only break it through the public
+        # `createProvider` / lazy transport / `getBuiltinModels` surface — which is exactly what
+        # the tests exercise. Bump the newer entry when pi releases; move the older one when
+        # fullsend moves its pin.
+        pi: ["0.99.2", "1.1.0"]
+    name: ci (pi ${{ matrix.pi }})
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      # pi is a devDependency (for its types) and a peer (at runtime pi supplies its own copy).
+      # The matrix replaces the lockfile's pi with each supported version before testing.
+      - run: npm ci
+      - run: npm install --no-save --ignore-scripts @earendil-works/pi-ai@${{ matrix.pi }} @earendil-works/pi-coding-agent@${{ matrix.pi }}
+      - run: npm run ci
+
+  # One stable context for the branch ruleset to require: the matrix job names carry the pi
+  # version and change on every bump, so the ruleset points here instead.
+  ci:
+    needs: matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: All matrix legs passed
+        env:
+          RESULT: ${{ needs.matrix.result }}
+        run: |
+          echo "matrix result: $RESULT"
+          [ "$RESULT" = "success" ]
