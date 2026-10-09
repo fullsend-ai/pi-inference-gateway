@@ -134,6 +134,11 @@ export interface GatewayConfig {
   id: string;
   /** Gateway root: no trailing slash, no trailing `/v1`. */
   baseUrl: string;
+  /**
+   * The variable `baseUrl` was read from (`baseUrlEnv` in the file); undefined for a literal
+   * `baseUrl`. Lets a warning name the variable instead of printing its value.
+   */
+  baseUrlEnv?: string;
   /** Environment variable holding a static key. Never a literal key. */
   apiKeyEnv?: string;
   /** File holding the token, re-read on every request. Wins over `apiKeyEnv`. */
@@ -526,6 +531,7 @@ export function parseProviderEntry(
   const config: GatewayConfig = {
     id,
     baseUrl,
+    ...(typeof raw.baseUrlEnv === "string" ? { baseUrlEnv: raw.baseUrlEnv } : {}),
     authHeaders,
     defaultApi: DEFAULT_API,
     headers: parseHeaders(raw.headers, where, warnings, credentialHeaderNames(authHeaders)),
@@ -771,13 +777,20 @@ export function mergeProviders(
     }
     if (file.baseUrl !== provider.baseUrl) {
       const source = sources?.get(file.id);
+      // Name the key the user wrote; for baseUrlEnv, the variable only, never its value.
+      const fileSetting =
+        file.baseUrlEnv !== undefined
+          ? `providers.${file.id}.baseUrlEnv (${file.baseUrlEnv})`
+          : `providers.${file.id}.baseUrl (${file.baseUrl})`;
       warnings.push(
-        `${source ? `${source}: ` : ""}providers.${file.id}.baseUrl (${file.baseUrl}) is ignored: ${ENV.baseUrl} (${provider.baseUrl}) configures this provider; ` +
+        `${source ? `${source}: ` : ""}${fileSetting} is ignored: ${ENV.baseUrl} (${provider.baseUrl}) configures this provider; ` +
           `remove one of them, or give the file entry another id`,
       );
     }
+    // The base URL now comes from the environment, so the file's baseUrlEnv no longer describes it.
+    const { baseUrlEnv: _fileBaseUrlEnv, ...fileRest } = file;
     merged.set(provider.id, {
-      ...file,
+      ...fileRest,
       baseUrl: provider.baseUrl,
       apiKeyEnv: provider.apiKeyEnv,
       tokenFile: provider.tokenFile ?? file.tokenFile,
