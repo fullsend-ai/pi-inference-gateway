@@ -136,9 +136,13 @@ describe("review 2: a restored snapshot is rebound to the current connection", (
 });
 
 describe("review 3: a successful refresh replaces the startup list (through pi's real Models)", () => {
+  // Serves `lists` in order on the OpenAI-format list; the Anthropic-format request finds no catalog.
   function gateway(lists: unknown[]) {
     let call = 0;
-    const fetch: FetchFunction = async () => new Response(JSON.stringify(lists[Math.min(call++, lists.length - 1)]), { status: 200 });
+    const fetch: FetchFunction = async (_input, init) =>
+      new Headers(init?.headers).has("anthropic-version")
+        ? new Response("not found", { status: 404 })
+        : new Response(JSON.stringify(lists[Math.min(call++, lists.length - 1)]), { status: 200 });
     return { fetch, deps: { env: ENV, fetch } };
   }
 

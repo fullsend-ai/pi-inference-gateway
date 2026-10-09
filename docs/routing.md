@@ -9,7 +9,9 @@ First match wins:
 
 1. Config `models[id].api`.
 2. A hint from the gateway: an `api` field, or `endpoint` / `supported_endpoints` naming
-   `/v1/messages`, `/v1/responses` or `/v1/chat/completions`.
+   `/v1/messages`, `/v1/responses` or `/v1/chat/completions`. An id that only the Anthropic-format
+   list has counts as an `anthropic-messages` hint (see
+   [Discovery: both list formats](configuration.md#discovery-both-list-formats)).
 3. pi's built-in catalog has the id under `anthropic` → Messages, under `openai` → Responses.
 4. The id starts with `claude-` (also after a `vendor/` prefix) → Messages.
 5. The owner (`owned_by`, `provider`, `litellm_provider`): anything Anthropic → Messages;

@@ -7,6 +7,7 @@ import {
   authHeaderEntry,
   authHeaderFor,
   bindEnvCredentials,
+  discoveryDialects,
   resolveCredentials,
   parseAuthHeaderEnv,
   parseAuthHeaders,
@@ -493,6 +494,50 @@ describe("extra models", () => {
       HOME,
     );
     assert.deepEqual(providers[0].models, { "gpt-6-luna": { api: "openai-responses" } });
+  });
+});
+
+describe("discovery dialects", () => {
+  const BASE = { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com" };
+  const fileEntry = (discovery: unknown) =>
+    parseConfigFile({ providers: { gateway: { baseUrl: "https://gw.example.com", discovery } } }, HOME, {});
+
+  it("queries both list formats by default", () => {
+    const [provider] = envProvider(BASE, HOME).providers;
+    assert.equal(provider.discovery, undefined);
+    assert.deepEqual(discoveryDialects(provider), ["openai", "anthropic"]);
+  });
+
+  it('reads "discovery" from the config file, in canonical order without duplicates', () => {
+    assert.deepEqual(fileEntry(["openai"]).providers[0].discovery, ["openai"]);
+    assert.deepEqual(fileEntry(["anthropic"]).providers[0].discovery, ["anthropic"]);
+    const both = fileEntry(["anthropic", "openai", "anthropic"]);
+    assert.deepEqual(both.warnings, []);
+    assert.deepEqual(both.providers[0].discovery, ["openai", "anthropic"]);
+  });
+
+  it('warns on an invalid "discovery" and keeps both', () => {
+    for (const value of [[], ["openai", "gemini"], "openai", [1]]) {
+      const { providers, warnings } = fileEntry(value);
+      assert.equal(providers[0].discovery, undefined);
+      assert.match(warnings.join("\n"), /"discovery" must be a non-empty list of openai, anthropic; using both/);
+    }
+  });
+
+  it("reads INFERENCE_GATEWAY_DISCOVERY as a comma-separated list", () => {
+    const { providers, warnings } = envProvider({ ...BASE, INFERENCE_GATEWAY_DISCOVERY: " anthropic , " }, HOME);
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(providers[0].discovery, ["anthropic"]);
+    const invalid = envProvider({ ...BASE, INFERENCE_GATEWAY_DISCOVERY: "openai,bogus" }, HOME);
+    assert.equal(invalid.providers[0].discovery, undefined);
+    assert.match(invalid.warnings.join("\n"), /INFERENCE_GATEWAY_DISCOVERY: must be a non-empty list of openai, anthropic; using both/);
+  });
+
+  it("the environment variable wins over the file", () => {
+    const file = fileEntry(["openai"]).providers;
+    const env = envProvider({ ...BASE, INFERENCE_GATEWAY_DISCOVERY: "anthropic" }, HOME).providers;
+    assert.deepEqual(mergeProviders(env, file)[0].discovery, ["anthropic"]);
+    assert.deepEqual(mergeProviders(envProvider(BASE, HOME).providers, file)[0].discovery, ["openai"]);
   });
 });
 

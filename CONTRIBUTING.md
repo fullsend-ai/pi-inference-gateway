@@ -43,8 +43,11 @@ extension factory (awaited by pi before startup)
     mergeConfigOverlay()  inference-gateway.local.json over it, per provider and per model
     bindEnvCredentials()  drop providers using INFERENCE_GATEWAY_* credentials for another URL
     dropCredentialHeaders() drop static headers named like an auth header
-  initialModels()         GET {baseUrl}/v1/models, 5 s, redirect: "error", 1 MiB cap
+  initialModels()         GET {baseUrl}/v1/models, 5 s, redirect: "error", 1 MiB cap; twice in
+                          parallel: OpenAI format (discovery scheme) and Anthropic format
+                          (anthropic-messages scheme + anthropic-version)
     parseModelList()      {data:[...]} | {models:[...]} | [...]; sanitise; cap 1000
+    mergeModelLists()     by id; Anthropic-only ids → anthropic-messages
     buildModel()          selectApi() + metadata merge + compat validation; id kept verbatim
     + config-added models (models[id] with an api the list lacks)
   createGatewayProvider()
@@ -190,7 +193,8 @@ pi -ne -e . --list-models
 ```
 
 (`-ne -e .` loads only this checkout's extension; a normal `pi install` needs neither flag.) The mock
-lists a Claude and a Gemini model, accepts only `x-api-key` on `/v1/messages`, and serves the unlisted
+lists a Gemini model on its OpenAI-format list and a Claude model on its Anthropic-format list,
+accepts only `x-api-key` on `/v1/messages` (and on the Anthropic-format list), and serves the unlisted
 `gpt-*` and `oss/zai-org/glm-5-3` models described in
 [Models the gateway does not list](docs/configuration.md#models-the-gateway-does-not-list). Start it with `--auth basic` to require
 `Basic gateway:test-pass` on every path instead (see [Praxis](docs/gateways/praxis.md)), or with `--mode agentgateway` for Bearer everywhere
@@ -214,7 +218,7 @@ pi -ne -e . --no-session -p --model gateway/gpt-6-luna "say hi"
 pi -ne -e . --no-session -p --model gateway/oss/zai-org/glm-5-3 "say hi"
 ```
 
-The mock logs `<method> <path> auth=<header names> model=<id>` per request. Repeat with
+The mock logs `<method> <path> auth=<header names> [anthropic-version] model=<id>` per request. Repeat with
 `node scripts/mock-gateway.mjs 47812 --auth basic` and `INFERENCE_GATEWAY_AUTH_HEADER=basic`,
 `INFERENCE_GATEWAY_BASIC_PASSWORD=test-pass` (Praxis's documented setup), and with
 `node scripts/mock-gateway.mjs 47813 --mode agentgateway` and `INFERENCE_GATEWAY_AUTH_HEADER=bearer`

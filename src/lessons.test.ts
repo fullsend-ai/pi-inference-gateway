@@ -168,7 +168,8 @@ describe("lesson 2: PI_OFFLINE and INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS", () =
 
   it("an invalid value warns and keeps the default", async () => {
     const { urls, warnings, models } = await register({ INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS: "soon" });
-    assert.deepEqual(urls, ["http://127.0.0.1:4000/v1/models"]);
+    // One request per list format (OpenAI and Anthropic), both on the models path.
+    assert.deepEqual(urls, ["http://127.0.0.1:4000/v1/models", "http://127.0.0.1:4000/v1/models"]);
     assert.deepEqual(models, ["live"]);
     assert.match(warnings.join("\n"), /INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS: must be a whole number of milliseconds \(0 skips/);
   });

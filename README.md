@@ -45,8 +45,8 @@ gateway   gpt-6-luna                272K     128K     yes       yes
 gateway   oss/zai-org/glm-5-3       1M       131.1K   yes       no
 ```
 
-That gateway lists only `claude-sonnet-5` and `gemini-3.5-flash`, both as `owned_by: "vertex"` with
-no other metadata. The context windows and thinking support come from pi's own built-in catalog;
+That gateway lists only `gemini-3.5-flash` (as `owned_by: "vertex"`) on its OpenAI-format list and
+`claude-sonnet-5` on its Anthropic-format list, with no other metadata. The context windows and thinking support come from pi's own built-in catalog;
 `gpt-6-luna` and `oss/zai-org/glm-5-3` come from the config file.
 
 Then run a prompt:

@@ -6,6 +6,7 @@ import type { GatewayConfig } from "./config.ts";
 import {
   DEFAULTS,
   LIMITS,
+  anthropicListHeaders,
   baseUrlFor,
   buildModel,
   catalogCandidates,
@@ -775,6 +776,207 @@ describe("discoverModels", () => {
     assert.deepEqual(discoveryHeaders({ headers: {}, authHeaders: { "anthropic-messages": "authorization", "openai-responses": "x-api-key" } }, "t"), {
       authorization: "Bearer t",
     });
+  });
+});
+
+describe("discoverModels: OpenAI- and Anthropic-format lists", () => {
+  /** Long enough to be redacted from an error body rather than omit it (MIN_REDACTABLE_SECRET). */
+  const LONG_TOKEN = "tok-list-q9z8x7"; // gitleaks:allow (test fixture)
+  const isAnthropic = (call: Call) => new Headers(call.init?.headers).has("anthropic-version");
+  /** An Anthropic-format list body, as `GET /v1/models` with `anthropic-version` returns it. */
+  const anthropicList = (ids: string[], hasMore = false) => ({
+    data: ids.map((id) => ({ type: "model", id, display_name: `Display ${id}`, created_at: "2026-01-01T00:00:00Z" })),
+    has_more: hasMore,
+    first_id: ids[0] ?? null,
+    last_id: ids.at(-1) ?? null,
+  });
+  /** Answers the OpenAI-format request with `openai` and the Anthropic-format one with `anthropic`. */
+  const twoLists = (openai: () => Response, anthropic: () => Response) => stubFetch((call) => (isAnthropic(call) ? anthropic() : openai()));
+  const openaiBody = { object: "list", data: [{ id: "vendor-q", owned_by: "vertex" }, { id: "shared-q", owned_by: "openai" }] };
+  const routes = (models: { id: string; api: string }[]) => models.map((model) => [model.id, model.api]);
+
+  it("sends both requests to the models URL, each with its own target's auth scheme", async () => {
+    const { calls, fetch } = twoLists(
+      () => json(openaiBody),
+      () => json(anthropicList(["alias-q"])),
+    );
+    await discoverModels(config({ headers: { "x-team": "docs" } }), { token: "tok", fetch });
+    assert.equal(calls.length, 2);
+    const openai = calls.find((call) => !isAnthropic(call));
+    const anthropic = calls.find(isAnthropic);
+    assert.ok(openai && anthropic);
+    assert.equal(openai.url, "https://gw.example.com/v1/models");
+    assert.equal(anthropic.url, "https://gw.example.com/v1/models");
+    assert.equal(anthropic.init?.redirect, "error");
+    const sentOpenai = new Headers(openai.init?.headers);
+    assert.equal(sentOpenai.get("authorization"), "Bearer tok");
+    assert.equal(sentOpenai.has("x-api-key"), false);
+    const sentAnthropic = new Headers(anthropic.init?.headers);
+    assert.equal(sentAnthropic.get("anthropic-version"), "2023-06-01");
+    assert.equal(sentAnthropic.get("x-api-key"), "tok");
+    assert.equal(sentAnthropic.has("authorization"), false);
+    assert.equal(sentAnthropic.get("x-team"), "docs");
+  });
+
+  it("puts the anthropic-messages scheme on the Anthropic-format request: Bearer, Basic or a custom header", async () => {
+    const sent = async (cfg: GatewayConfig, options: { token?: string; credentials?: { basic: { username: string; password: string }; problems: string[] } }) => {
+      const { calls, fetch } = twoLists(
+        () => json(openaiBody),
+        () => json(anthropicList(["alias-q"])),
+      );
+      await discoverModels(cfg, { ...options, fetch });
+      const call = calls.find(isAnthropic);
+      assert.ok(call);
+      return Object.fromEntries(new Headers(call.init?.headers));
+    };
+    assert.deepEqual(await sent(config({ authHeaders: { "anthropic-messages": "authorization" } }), { token: "tok" }), {
+      accept: "application/json",
+      "anthropic-version": "2023-06-01",
+      authorization: "Bearer tok",
+    });
+    assert.deepEqual(await sent(config({ authHeaders: { "anthropic-messages": "x-gateway-key" } }), { token: "tok" }), {
+      accept: "application/json",
+      "anthropic-version": "2023-06-01",
+      "x-gateway-key": "tok",
+    });
+    const basic = { basic: { username: "user", password: "pw" }, problems: [] }; // gitleaks:allow (test fixture)
+    assert.deepEqual(await sent(config({ authHeaders: { "anthropic-messages": "basic", discovery: "basic" } }), { credentials: basic }), {
+      accept: "application/json",
+      "anthropic-version": "2023-06-01",
+      authorization: `Basic ${Buffer.from("user:pw").toString("base64")}`,
+    });
+  });
+
+  it("merges by id: an Anthropic-only id defaults to Messages, an id in both lists keeps today's rules", async () => {
+    const { fetch } = twoLists(
+      () => json(openaiBody),
+      () => json(anthropicList(["alias-q", "shared-q"])),
+    );
+    const models = await discoverModels(config(), { token: "tok", fetch, warn: (message) => assert.fail(message) });
+    assert.deepEqual(routes(models), [
+      ["vendor-q", "openai-responses"],
+      ["shared-q", "openai-responses"],
+      ["alias-q", "anthropic-messages"],
+    ]);
+    assert.equal(models.find((model) => model.id === "alias-q")?.name, "Display alias-q");
+  });
+
+  it("a config models[id].api still wins over the Anthropic-only default", async () => {
+    const { fetch } = twoLists(
+      () => json(openaiBody),
+      () => json(anthropicList(["alias-q"])),
+    );
+    const models = await discoverModels(config({ models: { "alias-q": { api: "openai-completions" } } }), { token: "tok", fetch });
+    assert.equal(models.find((model) => model.id === "alias-q")?.api, "openai-completions");
+  });
+
+  for (const status of [401, 404]) {
+    it(`a ${status} on the Anthropic-format list means no such catalog: no warning, the OpenAI list's models`, async () => {
+      const warnings: string[] = [];
+      const { fetch } = twoLists(
+        () => json(openaiBody),
+        () => new Response("nope", { status }),
+      );
+      const models = await discoverModels(config(), { token: "tok", fetch, warn: (message) => warnings.push(message) });
+      assert.deepEqual(routes(models), [
+        ["vendor-q", "openai-responses"],
+        ["shared-q", "openai-responses"],
+      ]);
+      assert.deepEqual(warnings, []);
+    });
+  }
+
+  it("another Anthropic-format failure warns (redacted) and keeps the OpenAI list's models", async () => {
+    const warnings: string[] = [];
+    const { fetch } = twoLists(
+      () => json(openaiBody),
+      () => new Response(`upstream rejected key ${LONG_TOKEN}`, { status: 502 }),
+    );
+    const models = await discoverModels(config(), { token: LONG_TOKEN, fetch, warn: (message) => warnings.push(message) });
+    assert.deepEqual(
+      models.map((model) => model.id),
+      ["vendor-q", "shared-q"],
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /Anthropic-format model list failed \(model list request returned HTTP 502: upstream rejected key \[redacted\]\)/);
+    assert.ok(!warnings[0].includes(LONG_TOKEN));
+  });
+
+  it("an OpenAI-format failure warns and lists the Anthropic-format list's models", async () => {
+    const warnings: string[] = [];
+    const { fetch } = twoLists(
+      () => new Response("down", { status: 503 }),
+      () => json(anthropicList(["alias-q"])),
+    );
+    const models = await discoverModels(config(), { token: LONG_TOKEN, fetch, warn: (message) => warnings.push(message) });
+    assert.deepEqual(routes(models), [["alias-q", "anthropic-messages"]]);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /OpenAI-format model list failed \(model list request returned HTTP 503: down\); listing the Anthropic-format/);
+  });
+
+  it("both lists failing rejects with the OpenAI-format list's error", async () => {
+    const { fetch } = twoLists(
+      () => new Response("down", { status: 503 }),
+      () => new Response("nope", { status: 401 }),
+    );
+    await assert.rejects(discoverModels(config(), { token: LONG_TOKEN, fetch }), { message: "model list request returned HTTP 503: down" });
+  });
+
+  it("an OpenAI-format failure with an empty Anthropic-format list rejects with the OpenAI error", async () => {
+    const { fetch } = twoLists(
+      () => new Response("down", { status: 503 }),
+      () => json(anthropicList([])),
+    );
+    await assert.rejects(discoverModels(config(), { token: LONG_TOKEN, fetch }), { message: "model list request returned HTTP 503: down" });
+  });
+
+  it("an empty OpenAI-format list and no Anthropic catalog is still an empty-list failure", async () => {
+    const { fetch } = twoLists(
+      () => json({ data: [] }),
+      () => new Response("nope", { status: 404 }),
+    );
+    await assert.rejects(discoverModels(config(), { token: "tok", fetch }), /model list is empty/);
+  });
+
+  it('discovery: ["openai"] sends only the OpenAI-format request', async () => {
+    const { calls, fetch } = stubFetch(() => json(openaiBody));
+    await discoverModels(config({ discovery: ["openai"] }), { token: "tok", fetch });
+    assert.equal(calls.length, 1);
+    const headers = new Headers(calls[0].init?.headers);
+    assert.equal(headers.get("authorization"), "Bearer tok");
+    assert.equal(headers.has("anthropic-version"), false);
+  });
+
+  it('discovery: ["anthropic"] sends only the Anthropic-format request', async () => {
+    const { calls, fetch } = stubFetch(() => json(anthropicList(["alias-q"])));
+    const models = await discoverModels(config({ discovery: ["anthropic"] }), { token: "tok", fetch });
+    assert.equal(calls.length, 1);
+    const headers = new Headers(calls[0].init?.headers);
+    assert.equal(headers.get("anthropic-version"), "2023-06-01");
+    assert.equal(headers.get("x-api-key"), "tok");
+    assert.equal(headers.has("authorization"), false);
+    assert.deepEqual(routes(models), [["alias-q", "anthropic-messages"]]);
+  });
+
+  it("warns that only the first page is listed when the Anthropic-format list has more", async () => {
+    const warnings: string[] = [];
+    const { fetch } = twoLists(
+      () => json(openaiBody),
+      () => json(anthropicList(["alias-q"], true)),
+    );
+    await discoverModels(config(), { token: "tok", fetch, warn: (message) => warnings.push(message) });
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /has more pages \(has_more\); only its first page is listed/);
+  });
+
+  it("never sends two credentials, even with a static header named like one", () => {
+    const headers = anthropicListHeaders({ headers: { authorization: "Bearer other", "x-api-key": "other" }, authHeaders: {} }, "tok");
+    assert.deepEqual(headers, { "anthropic-version": "2023-06-01", "x-api-key": "tok" });
+  });
+
+  it("a static anthropic-version header replaces the default, whatever its case", () => {
+    const headers = anthropicListHeaders({ headers: { "Anthropic-Version": "2024-01-01" }, authHeaders: {} }, "tok");
+    assert.deepEqual(headers, { "Anthropic-Version": "2024-01-01", "x-api-key": "tok" });
   });
 });
 
