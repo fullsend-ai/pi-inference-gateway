@@ -816,6 +816,19 @@ describe("local overlay file", () => {
     assert.ok(warnings[0].startsWith(`${SHARED} + ${LOCAL}: providers.corp: "defaultApi"`), warnings[0]);
   });
 
+  it("attributes an env/file base URL conflict to the file the entry came from", async () => {
+    const conflictEnv = { INFERENCE_GATEWAY_BASE_URL: "https://gateway.example.com" };
+    const local = JSON.stringify({ providers: { gateway: { baseUrl: "https://other.example.com/v1" } } });
+    const onlyLocal = await loadConfig({ env: conflictEnv, home: HOME, readText: files({ [LOCAL]: local }) });
+    assert.equal(onlyLocal.warnings.length, 1, onlyLocal.warnings.join("\n"));
+    assert.ok(onlyLocal.warnings[0].startsWith(`${LOCAL}: providers.gateway.baseUrl`), onlyLocal.warnings[0]);
+    assert.ok(!onlyLocal.warnings[0].includes(SHARED), onlyLocal.warnings[0]);
+
+    const sharedOnly = JSON.stringify({ providers: { gateway: { baseUrl: "https://other.example.com/v1" } } });
+    const onlyShared = await loadConfig({ env: conflictEnv, home: HOME, readText: files({ [SHARED]: sharedOnly }) });
+    assert.ok(onlyShared.warnings[0].startsWith(`${SHARED}: providers.gateway.baseUrl`), onlyShared.warnings[0]);
+  });
+
   it("reads the overlay from PI_CODING_AGENT_DIR and keeps __proto__ an ordinary key", async () => {
     const local = '{"providers":{"corp":{"models":{"__proto__":{"api":"openai-completions"}}}}}';
     const { providers } = await loadConfig({
