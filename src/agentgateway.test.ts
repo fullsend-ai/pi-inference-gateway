@@ -206,6 +206,58 @@ describe("D5: text/plain error bodies are shown, never a credential", () => {
     });
   });
 
+  describe("escaped and re-encoded credentials", () => {
+    const basic = { username: "gateway-user", password: 'pw"with\\quote-9' }; // gitleaks:allow (test fixture)
+    const ENCODABLE = "tok/abc+def=ghi&jkl"; // gitleaks:allow (test fixture)
+
+    it("redacts a password echoed JSON-escaped", async () => {
+      const escaped = JSON.stringify(basic.password).slice(1, -1);
+      assert.notEqual(escaped, basic.password);
+      const body = JSON.stringify({ error: `password ${basic.password} is wrong` });
+      const cfg = config({ authHeaders: { discovery: "basic" } });
+      await assert.rejects(discoverModels(cfg, { credentials: { basic, problems: [] }, fetch: text(401, body) }), (error: Error) => {
+        assert.ok(!error.message.includes(escaped), error.message);
+        assert.ok(!error.message.includes(basic.password), error.message);
+        assert.match(error.message, /password \[redacted\] is wrong/);
+        return true;
+      });
+    });
+
+    it("redacts a token echoed percent-encoded", async () => {
+      const encoded = encodeURIComponent(ENCODABLE);
+      assert.notEqual(encoded, ENCODABLE);
+      await assert.rejects(discoverModels(config(), { token: ENCODABLE, fetch: text(401, `rejected /v1/models?key=${encoded}`) }), {
+        message: "model list request returned HTTP 401: rejected /v1/models?key=[redacted]",
+      });
+    });
+
+    it("never keeps the prefix of a percent-encoded token cut by the read limit", async () => {
+      const encoded = encodeURIComponent(ENCODABLE);
+      for (let offset = 480; offset <= 512; offset++) {
+        const body = `${" ".repeat(offset - 1)}a${encoded}${"b".repeat(600)}`;
+        await assert.rejects(discoverModels(config(), { token: ENCODABLE, fetch: text(401, body) }), (error: Error) => {
+          for (let length = 1; length <= encoded.length; length++) {
+            assert.ok(!error.message.includes(`a${encoded.slice(0, length)}`), `offset ${offset}: prefix of length ${length} kept`);
+          }
+          return true;
+        });
+      }
+    });
+  });
+
+  it("adds nothing for a text/plain body with C0 control characters, such as BOM-less UTF-16", async () => {
+    const utf16 = (status: number) =>
+      (async () =>
+        new Response(new Uint8Array(Buffer.from(`invalid API key ${TOKEN}`, "utf16le")), {
+          status,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        })) satisfies FetchFunction;
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: utf16(401) }), { message: "model list request returned HTTP 401" });
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: text(401, "bell\u0007here") }), {
+      message: "model list request returned HTTP 401",
+    });
+  });
+
   it("never keeps the prefix of a credential cut by the read limit", async () => {
     for (let offset = 480; offset <= 512; offset++) {
       // Whitespace collapses when the body is flattened, so a cut 500 bytes in can still be shown.
@@ -220,7 +272,8 @@ describe("D5: text/plain error bodies are shown, never a credential", () => {
   });
 
   it("truncates long bodies and strips control characters", async () => {
-    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: text(500, `a\u0007b${"x".repeat(5000)}`) }), (error: Error) => {
+    // DEL, not a C0 control: a body with C0 controls other than tab, LF and CR is not shown at all.
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: text(500, `a\u007fb${"x".repeat(5000)}`) }), (error: Error) => {
       assert.ok(error.message.length < 400, String(error.message.length));
       assert.match(error.message, /HTTP 500: a bx+…$/);
       return true;

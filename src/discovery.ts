@@ -112,9 +112,10 @@ const MIN_REDACTABLE_SECRET = 8;
 export const BODY_OMITTED = "(body omitted)";
 
 /**
- * Every form a credential can take in an error body: the token, the Basic username, password,
- * `user:password` pair and its base64, and the exact auth header value sent (`Bearer <token>`,
- * `Basic <base64>`, or a raw custom-header value).
+ * Every literal form a credential can take in an error body: the token, the Basic username,
+ * password, `user:password` pair and its base64, and the exact auth header value sent
+ * (`Bearer <token>`, `Basic <base64>`, or a raw custom-header value). plainTextDetail also redacts
+ * each one's escaped and encoded forms (see redactableForms).
  */
 export function credentialComponents(credentials: GatewayCredentials | undefined, headerValue?: string): string[] {
   const components = new Set<string>();
@@ -152,16 +153,30 @@ function componentsOfHeaders(headers: Record<string, string>): string[] {
 }
 
 /**
+ * A credential component as a gateway may echo it: literally, JSON-escaped (inside a JSON-ish text
+ * body) and percent-encoded (encodeURIComponent). Neither encoded form is shorter than the literal.
+ */
+function redactableForms(secret: string): string[] {
+  const forms = [secret, JSON.stringify(secret).slice(1, -1)];
+  try {
+    forms.push(encodeURIComponent(secret));
+  } catch {
+    // A lone surrogate has no percent-encoded form (URIError): there is nothing more to redact.
+  }
+  return forms;
+}
+
+/**
  * The start of a `text/plain` error body, or of one with no (or an empty) content-type, for an
  * error message — only when it can be made safe:
  *   1. read at most ERROR_DETAIL_BYTES (+1, to know whether it was cut); an untyped body must be
- *      valid UTF-8 (a multi-byte character cut by the limit is fine), else nothing is shown. An
- *      untyped body with C0 control characters other than tab, LF and CR is not shown either (it
- *      may be in another encoding, such as UTF-16, that the redaction cannot match);
+ *      valid UTF-8 (a multi-byte character cut by the limit is fine), else nothing is shown. A
+ *      body with C0 control characters other than tab, LF and CR is not shown either (it may be
+ *      in another encoding, such as UTF-16, that the redaction cannot match);
  *   2. if any credential component is shorter than MIN_REDACTABLE_SECRET, show nothing but
  *      BODY_OMITTED (a short secret cannot be told apart from ordinary text);
- *   3. replace every occurrence of every component, embedded ones too, case-sensitively,
- *      longest first;
+ *   3. replace every occurrence of every component, and of its JSON-escaped and percent-encoded
+ *      forms (redactableForms), embedded ones too, case-sensitively, longest first;
  *   4. if the read was cut, drop the last (longest component − 1) characters, so no credential
  *      prefix survives the cut;
  *   5. flatten control characters and whitespace, and show at most ERROR_DETAIL_CHARS.
@@ -203,10 +218,11 @@ async function plainTextDetail(response: Response, secrets: readonly string[]): 
     return "";
   }
   // Valid UTF-8 can still be text in another encoding: BOM-less UTF-16 ASCII is NUL-separated, so a
-  // credential in it would not match the redaction below. Real error text has no such controls.
-  // (A declared text/plain body keeps its established behavior: controls are flattened below.)
-  if (untyped && /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text)) return "";
-  const ordered = [...secrets].sort((a, b) => b.length - a.length);
+  // credential in it would not match the redaction below. Real error text has no such controls,
+  // declared text/plain or not.
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text)) return "";
+  // The encoded forms join the list before the sort, so the truncation trim below covers them too.
+  const ordered = [...new Set(secrets.flatMap(redactableForms))].sort((a, b) => b.length - a.length);
   for (const secret of ordered) text = text.split(secret).join("[redacted]");
   // After redacting, not before: a credential that was complete in the read is already replaced,
   // and one cut by the read limit is an unmatched prefix of at most (longest − 1) characters at the
