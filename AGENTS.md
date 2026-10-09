@@ -46,9 +46,14 @@ npm run ci
 - **Trust `node_modules/@earendil-works/pi-ai/dist/**/*.d.ts`, not pi's prose docs**, including for
   which entry point declares a name (`getBuiltinModels` is on `/providers/all`, the transports on
   `/compat`, `createProvider` on the root).
-- **Auth is ambient: `auth.apiKey` with no `login`, never `auth.oauth`.** The token comes from an
-  environment variable or a token file re-read on every request; `resolve()` returns `undefined`
-  when neither is set.
+- **Auth is ambient: `auth.apiKey` with no `login`, never `auth.oauth`.** Credentials come from
+  environment variables or files re-read on every request; `resolve()` returns `undefined` when
+  none is set. The wire header always comes from `createGatewayFetch` (per-target scheme: bearer,
+  raw header, or basic), never from pi's `apiKey`.
+- **Never log a credential**, not even a username. Warnings name variables and files only.
+- **`INFERENCE_GATEWAY_*` credentials are bound to `INFERENCE_GATEWAY_BASE_URL`**
+  (`bindEnvCredentials`). Do not weaken that, and never read a project-level `.pi/` config.
+- **Every transport stays wrapped** so inference requests use `redirect: "error"`.
 - **No shell-out, no `!command` keys, no literal secrets** in code, config examples, docs or tests.
   A config file references keys by variable name (`apiKeyEnv`) or path (`tokenFile`) only.
 - **No third-party catalog fetch** (no models.dev or similar). Metadata comes from the gateway, then
@@ -71,9 +76,11 @@ npm run ci
 ## Before you commit
 
 - `npm run ci` passes on every pi version in the CI matrix.
-- `node scripts/mock-gateway.mjs` plus `pi -ne -e . --list-models` and one `pi -p` per transport
-  (see CONTRIBUTING.md, "Local end-to-end") after any change to discovery, routing or auth. Use a
-  throwaway `PI_CODING_AGENT_DIR`.
+- `node scripts/mock-gateway.mjs` (and `--auth basic`) plus `pi -ne -e . --list-models` and one
+  `pi -p` per transport (see CONTRIBUTING.md, "Local end-to-end") after any change to discovery,
+  routing or auth. Use a throwaway `PI_CODING_AGENT_DIR`.
+- The global secret scanner flags test fixtures such as `password: "test-pass"`. Mark a reviewed
+  false positive with an inline `// gitleaks:allow (...)` comment; never skip the hook.
 - Claims about pi or a gateway need a source: the shipped `.d.ts`, a live call, or vendor docs.
 - Commit format `{feat,fix,docs,test,chore}: <message>`, no emojis, and
   `Signed-off-by: <name> <email>` (`git commit -s`).

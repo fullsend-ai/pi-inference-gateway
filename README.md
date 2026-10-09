@@ -1,7 +1,7 @@
 # @fullsend-ai/pi-inference-gateway
 
-Any vendor-neutral **inference gateway** — LiteLLM, agentgateway, Bifrost, Portkey, an in-house
-proxy — as one [pi](https://github.com/earendil-works/pi) provider.
+Any vendor-neutral **inference gateway** — [Praxis](#praxis), LiteLLM, agentgateway, Bifrost,
+Portkey, an in-house proxy — as one [pi](https://github.com/earendil-works/pi) provider.
 
 It asks the gateway which models it serves (`GET /v1/models`), then sends **each model** over the
 protocol it needs: Claude over Anthropic Messages (`/v1/messages`), GPT over OpenAI Responses
@@ -33,7 +33,9 @@ export INFERENCE_GATEWAY_API_KEY=...                             # your gateway 
 | `INFERENCE_GATEWAY_TOKEN_FILE` | File holding the token, **re-read on every request** (rotating OIDC/WIF tokens). Wins over `API_KEY`. | — |
 | `INFERENCE_GATEWAY_PROVIDER_ID` | Provider id, i.e. the part before `/` in a model spec. | `gateway` |
 | `INFERENCE_GATEWAY_DEFAULT_API` | Transport for models nothing else identifies: `openai-responses`, `openai-completions` or `anthropic-messages`. | `openai-responses` |
-| `INFERENCE_GATEWAY_AUTH_HEADER` | Override the auth header — see [Auth headers](#auth-headers). | native per API |
+| `INFERENCE_GATEWAY_AUTH_HEADER` | Override the auth header — see [Auth headers](#auth). | native per API |
+| `INFERENCE_GATEWAY_BASIC_USER` | Basic-auth username — see [Auth](#auth). | `gateway` |
+| `INFERENCE_GATEWAY_BASIC_PASSWORD` / `_PASSWORD_FILE` | Basic-auth password, or a file holding it (re-read per request). | — |
 | `INFERENCE_GATEWAY_EXTRA_MODELS` | Models the gateway serves but does not list: `id=api,id=api`. | — |
 
 No `pi login`: auth is ambient. Without a key or token file the gateway's models are registered but
@@ -103,7 +105,8 @@ For several gateways, per-model overrides or models the gateway does not list, a
 |---|---|
 | `baseUrl` | Gateway root (required). |
 | `apiKeyEnv` / `tokenFile` | *Name* of the variable holding the key, or a path (`~/` allowed) re-read per request. A literal `apiKey`, or an `authorization`/`x-api-key` entry in `headers`, is refused. |
-| `authHeader` | See [Auth headers](#auth-headers). |
+| `username` / `usernameEnv`, `passwordEnv` / `passwordFile` | Basic-auth credentials (a literal `password` is refused). |
+| `authHeader` | See [Auth headers](#auth). |
 | `defaultApi` | As `INFERENCE_GATEWAY_DEFAULT_API`. |
 | `headers` | Extra headers on every request, discovery included. |
 | `modelsPath` | Model-list path, default `/v1/models`. |
@@ -139,29 +142,41 @@ then the gateway's own fields (`context_window`, `max_input_tokens`, `max_output
 `supports_vision`, `supports_reasoning`, LiteLLM-style `input_cost_per_token`, ...), then pi's
 built-in catalog, then defaults (128K context, 16K output, text only, no reasoning, zero cost).
 
-### Auth headers
+### Auth
 
-By default each transport sends the token the way its protocol does:
+Each request carries exactly one auth header, chosen per target by an **auth scheme**:
 
-| Request | Header |
-|---|---|
-| `/v1/messages` (Anthropic) | `x-api-key: <token>` |
-| `/v1/responses`, `/v1/chat/completions` | `authorization: Bearer <token>` |
-| `GET /v1/models` | `authorization: Bearer <token>` |
+| Scheme | Header sent | Credential |
+|---|---|---|
+| `bearer` (or `authorization`) | `authorization: Bearer <token>` | key / token file |
+| `x-api-key`, or any header name | `<header>: <token>` | key / token file |
+| `basic` | `authorization: Basic base64(<username>:<password>)` | username + password |
 
-If your gateway wants something else, override per target or for all of them:
+By default each transport uses its protocol's native scheme:
+
+| Target | Request | Default scheme |
+|---|---|---|
+| `anthropic-messages` | `POST /v1/messages` | `x-api-key` |
+| `openai-responses` | `POST /v1/responses` | `bearer` |
+| `openai-completions` | `POST /v1/chat/completions` | `bearer` |
+| `discovery` | `GET /v1/models` | `bearer` |
+
+Override one target, or all of them with a single value:
 
 ```json
-"authHeader": { "anthropic-messages": "authorization" }
+"authHeader": { "anthropic-messages": "bearer" }
 ```
 
 ```bash
-export INFERENCE_GATEWAY_AUTH_HEADER=x-api-key                                # every request
-export INFERENCE_GATEWAY_AUTH_HEADER=anthropic-messages=authorization         # Claude only
+export INFERENCE_GATEWAY_AUTH_HEADER=basic                              # every request
+export INFERENCE_GATEWAY_AUTH_HEADER=anthropic-messages=bearer          # Claude only
 ```
 
-`authorization` always means `Bearer <token>`; any other header carries the raw token. Exactly one
-auth header is sent.
+Basic auth reads its username from `INFERENCE_GATEWAY_BASIC_USER` (config: `usernameEnv`, or a literal
+`username`), defaulting to `gateway`. It reads its password from `INFERENCE_GATEWAY_BASIC_PASSWORD` or
+`INFERENCE_GATEWAY_BASIC_PASSWORD_FILE` (config: `passwordEnv` / `passwordFile`, re-read per request). A
+username containing `:` is refused. The key pi itself passes around is never sent: the header always
+comes from the configured credentials.
 
 ## Models the gateway does not list
 
@@ -212,6 +227,125 @@ background, and `/gateway-refresh` forces it. If the gateway cannot be reached a
 the config's `fallbackModels`, config-added models, and the list pi saved from its last interactive
 refresh.
 
+## Praxis
+
+[Praxis](https://github.com/praxis-proxy/praxis) (its AI gateway lives in `praxis-proxy/ai`) is the
+main gateway this extension is built for. Praxis's own documented clients are each pinned to one
+API: Codex to Responses, Claude Code to Messages, OpenCode to Chat Completions. Through this
+extension, one pi provider reaches all three. The walkthrough below runs against the mock gateway in
+this repo, started in its Praxis-style Basic mode; swap the base URL for your deployment's.
+
+### Pick your auth setup
+
+Praxis lets each deployment choose client auth. Both common setups work:
+
+- **Basic (the documented setup).** Clients send `Authorization: Basic base64(<user>:<password>)`
+  (default user `gateway`), and Praxis injects the backend token itself:
+
+  ```bash
+  export INFERENCE_GATEWAY_AUTH_HEADER=basic
+  export INFERENCE_GATEWAY_BASIC_PASSWORD=...          # or INFERENCE_GATEWAY_BASIC_PASSWORD_FILE
+  # export INFERENCE_GATEWAY_BASIC_USER=gateway        # only if your deployment changed it
+  ```
+
+- **Per-API keys.** Some deployments want `x-api-key` on `/v1/messages` and `Bearer` elsewhere.
+  That is the default, so only the key is needed:
+
+  ```bash
+  export INFERENCE_GATEWAY_API_KEY=...
+  ```
+
+### Name the provider `praxis`
+
+The package and the default provider id stay generic (`gateway`). Locally you can call it what you
+like:
+
+```bash
+export INFERENCE_GATEWAY_PROVIDER_ID=praxis      # model specs become praxis/<model>, e.g. praxis/claude-sonnet-5-5
+```
+
+### Add the models `/v1/models` does not list
+
+Praxis passes `GET /v1/models` through to **one** backend without merging, so the list is partial by
+design. Add the rest in `~/.pi/agent/inference-gateway.json` with the API each one is served on:
+Claude on Messages, GPT on Responses, Gemini and open-weight models on Chat Completions. Ids are sent
+to Praxis verbatim, `vendor/org/model` included.
+
+### Walkthrough (pi 1.0.2, mock gateway in Basic mode)
+
+```bash
+node scripts/mock-gateway.mjs 47812 --auth basic &      # requires Basic gateway:test-pass everywhere
+export PI_CODING_AGENT_DIR=$(mktemp -d)                 # keep your real ~/.pi untouched
+export INFERENCE_GATEWAY_BASE_URL=http://127.0.0.1:47812
+export INFERENCE_GATEWAY_PROVIDER_ID=praxis
+export INFERENCE_GATEWAY_AUTH_HEADER=basic
+export INFERENCE_GATEWAY_BASIC_PASSWORD=test-pass                # gitleaks:allow (mock password)
+cat > "$PI_CODING_AGENT_DIR/inference-gateway.json" <<'EOF'
+{ "providers": { "praxis": { "baseUrl": "http://127.0.0.1:47812",
+  "models": { "gpt-6-luna": { "api": "openai-responses" },
+              "oss/zai-org/glm-5-3": { "api": "openai-completions" } } } } }
+EOF
+```
+
+```console
+$ pi -ne -e . --list-models | grep -E '^(provider|praxis)'
+provider  model                     context  max-out  thinking  images
+praxis    claude-sonnet-5           1M       128K     yes       yes
+praxis    gemini-3.5-flash          1.0M     65.5K    yes       yes
+praxis    gpt-6-luna                272K     128K     yes       yes
+praxis    oss/zai-org/glm-5-3       1M       131.1K   yes       no
+$ pi -ne -e . --no-session -p --model praxis/claude-sonnet-5 "say hi"
+hi from /v1/messages as claude-sonnet-5
+$ pi -ne -e . --no-session -p --model praxis/gemini-3.5-flash "say hi"
+hi from /v1/chat/completions as gemini-3.5-flash
+$ pi -ne -e . --no-session -p --model praxis/gpt-6-luna "say hi"
+hi from /v1/responses as gpt-6-luna
+$ pi -ne -e . --no-session -p --model praxis/oss/zai-org/glm-5-3 "say hi"
+hi from /v1/chat/completions as oss/zai-org/glm-5-3
+```
+
+The mock lists only `claude-sonnet-5` and `gemini-3.5-flash` (both `owned_by: "vertex"`, as a
+single-backend pass-through would). The other two come from the config file. Its request log shows
+`authorization(Basic)` on every path, `/v1/models` included. The same run passes on pi 0.99.2, and
+in the per-API mode (`node scripts/mock-gateway.mjs 47811`, `INFERENCE_GATEWAY_API_KEY=test-token`).
+
+### Known limits with Praxis
+
+- Gemini tool calls on `/v1/chat/completions` may fail after the first turn: pi does not replay
+  Gemini's `thought_signature` (see [Known limitations](#known-limitations)).
+- Models inherit pi's catalog `compat` flags; if Praxis or its backend rejects a request field, turn
+  the flag off per model ([Request features (`compat`)](#request-features-compat)).
+
+## Security
+
+- **Credentials go only where you pointed them.** Like Praxis's own OpenCode plugin, which attaches
+  credentials only when the base URL equals `PRAXIS_BASE_URL`, credentials from
+  `INFERENCE_GATEWAY_*` variables attach only to the provider whose base URL equals
+  `INFERENCE_GATEWAY_BASE_URL`. The comparison normalises scheme, host, port and path, and ignores a
+  trailing slash or `/v1`. A config-file provider that names one of those variables for another URL
+  is refused, and nothing is sent to it:
+
+  ```console
+  $ cat $PI_CODING_AGENT_DIR/inference-gateway.json
+  { "providers": { "other": { "baseUrl": "http://127.0.0.1:47812", "apiKeyEnv": "INFERENCE_GATEWAY_API_KEY" } } }
+  $ pi --list-models | grep -E "^(provider|gateway|other) "
+  [pi-inference-gateway] other: refused — it uses INFERENCE_GATEWAY_API_KEY, which only authenticate to INFERENCE_GATEWAY_BASE_URL (http://127.0.0.1:47811), but its baseUrl is http://127.0.0.1:47812. Use a variable of your own (apiKeyEnv/passwordEnv) for this gateway.
+  provider  model                     context  max-out  thinking  images
+  gateway   claude-sonnet-5           1M       128K     yes       yes
+  gateway   gemini-3.5-flash          1.0M     65.5K    yes       yes
+  ```
+
+  Give any other gateway a variable of its own (`apiKeyEnv`, `passwordEnv`).
+- **Only your user-level config is read**: `~/.pi/agent/inference-gateway.json`, or the same file
+  under `$PI_CODING_AGENT_DIR`. A project's `.pi/` directory is never consulted, so a cloned repository
+  cannot point your credentials at its own host.
+- **No secrets in the file.** Keys and passwords are referenced by variable name or file path; a
+  literal `apiKey` or `password`, or an `authorization`/`x-api-key` entry in `headers`, is refused.
+  No `!command` keys, no shell-out.
+- **Redirects are never followed**, on model requests or on discovery: a redirect is an error, so a
+  key cannot be forwarded to another origin.
+- **Credentials are never logged.** Warnings name variables and files, never their values.
+
 ## Try it locally
 
 ```bash
@@ -224,7 +358,8 @@ pi -ne -e . --list-models
 
 (`-ne -e .` loads only this checkout's extension; a normal `pi install` needs neither flag.) The mock
 lists a Claude and a Gemini model, accepts only `x-api-key` on `/v1/messages`, and serves the unlisted
-`gpt-*` and `oss/zai-org/glm-5-3` models described above.
+`gpt-*` and `oss/zai-org/glm-5-3` models described above. Start it with `--auth basic` to require
+`Basic gateway:test-pass` on every path instead (see [Praxis](#praxis)).
 
 ## Requirements
 
@@ -260,6 +395,13 @@ the reverse: `"openai-responses": "x-api-key"` and so on.
 **A 400 naming a request field** (`tools.0.defer_loading`, `tool_stream`, `thinking`, ...). An
 inherited pi `compat` flag turned on a feature your gateway or its backend does not accept. Set that
 flag to `false` in `models["<id>"].compat`, or drop them all with `"compat": null`.
+
+**`[pi-inference-gateway] <id>: refused — it uses INFERENCE_GATEWAY_...`.** A config-file provider
+names an `INFERENCE_GATEWAY_*` credential but points at a different URL than
+`INFERENCE_GATEWAY_BASE_URL`. Give it a variable of its own, or fix the URL (see [Security](#security)).
+
+**401 on every request with Basic auth.** Check `INFERENCE_GATEWAY_AUTH_HEADER=basic` (or the
+per-target `authHeader`), the password variable or file, and the username (default `gateway`).
 
 **404 on a model that is listed.** The gateway serves it on a different path than the one picked.
 Set `models["<id>"].api` to the right transport.

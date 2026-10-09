@@ -21,12 +21,12 @@ by.
 ```
 ├── package.json            # "pi": { "extensions": ["./src/index.ts"] }; zero runtime dependencies
 ├── src/
-│   ├── config.ts           # env + inference-gateway.json → GatewayConfig[]; token resolution
+│   ├── config.ts           # env + inference-gateway.json → GatewayConfig[]; credentials; URL binding
 │   ├── discovery.ts        # fetch /v1/models, parse + sanitise, pick a transport, fill metadata
 │   ├── provider.ts         # createProvider wiring, auth, header override, refresh, registration
 │   ├── index.ts            # thin default export + /gateway-refresh
 │   ├── test-fixtures.ts    # canned SSE per transport, shared with the mock gateway
-│   └── *.test.ts           # node --test; no network, no pi process
+│   └── *.test.ts           # node --test; no network, no pi process (regressions.test.ts: review fixes)
 ├── scripts/mock-gateway.mjs  # local path-routed gateway for end-to-end runs
 └── .github/workflows/      # ci.yml (pi matrix), release.yml (tag → release with tarball digest)
 ```
@@ -56,9 +56,12 @@ pi refreshes dynamic model lists from the network only in interactive and RPC se
 extension factories, so the factory discovers with a short timeout and passes the result as static
 `models`. `fetchModels` is still set, for interactive refreshes and `/gateway-refresh`.
 
-createProvider restores pi's persisted snapshot over the static list on every refresh, offline ones
-included, which would bring back models the gateway has dropped. After a successful load-time
-discovery `createGatewayProvider()` withholds that snapshot; after a failed one it is the fallback.
+createProvider keeps its `models` as an immutable baseline and merges refreshes over it, so it could
+never drop a startup model. `createGatewayProvider()` therefore owns the list: `getModels()` returns
+it, and its own `refreshModels` replaces it on a successful fetch (persisting through
+`context.publish`). pi's persisted snapshot is restored only after a failed load-time discovery, and
+always through `rebindModels()`, which keeps id and metadata but takes base URL, headers, overrides
+and filters from the *current* config.
 
 ### One provider, three transports
 
@@ -68,15 +71,22 @@ from `@earendil-works/pi-ai/compat` (`anthropicMessagesApi`, `openAIResponsesApi
 `{root}/v1` (they append `/responses` or `/chat/completions`), the Anthropic SDK gets `{root}` (it
 appends `/v1/messages`).
 
-### Auth headers
+### Auth and the request fetch
 
-Each transport keeps its native header: `x-api-key` for Messages, `authorization: Bearer` for the
-OpenAI transports, Bearer for discovery. Gateways disagree about this per path — a path-routing
-front proxy in front of a Claude backend accepts only `x-api-key` on `/v1/messages`, while other
-gateways want Bearer everywhere — so the header is an optional per-target override. Only an
-overridden transport is wrapped by `withAuthHeader()`, which composes a `fetch` *underneath* pi's
-(`options.fetch` stays the transport that dials), removes both auth headers and sets the configured
-one.
+Every transport is wrapped by `withGatewayFetch()`, which composes a `fetch` *underneath* pi's
+(`options.fetch` stays the transport that dials). `createGatewayFetch()` does two things on every
+request:
+
+- forces `redirect: "error"`: fetch strips only `authorization` on a cross-origin redirect, so
+  following one would leak `x-api-key` or a custom header, and pi has no redirect option;
+- removes both auth headers pi's SDKs set and sets the one for the target's **auth scheme**
+  (`authHeaderFor`): native by default (`x-api-key` for Messages, Bearer for the OpenAI transports
+  and discovery), or the configured `bearer` / header name / `basic`. Credentials are resolved per
+  request (`resolveCredentials`), so token and password files rotate without a restart; pi's
+  `apiKey` is only what pi needs to dispatch (a placeholder under Basic).
+
+`bindEnvCredentials()` drops any provider that names an `INFERENCE_GATEWAY_*` credential variable
+while pointing somewhere other than `INFERENCE_GATEWAY_BASE_URL`, before anything is registered.
 
 ### Transport selection and metadata
 
@@ -164,7 +174,9 @@ pi -ne -e . --no-session -p --model gateway/gpt-6-luna "say hi"
 pi -ne -e . --no-session -p --model gateway/oss/zai-org/glm-5-3 "say hi"
 ```
 
-The mock logs `<method> <path> auth=<header names> model=<id>` per request. Run the same against the
+The mock logs `<method> <path> auth=<header names> model=<id>` per request. Repeat with
+`node scripts/mock-gateway.mjs 47812 --auth basic` and `INFERENCE_GATEWAY_AUTH_HEADER=basic`,
+`INFERENCE_GATEWAY_BASIC_PASSWORD=test-pass` (Praxis's documented setup). Run the same against the
 oldest pi in the matrix:
 
 ```bash

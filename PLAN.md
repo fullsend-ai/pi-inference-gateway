@@ -180,6 +180,63 @@ Decisions made while implementing, beyond the text above:
 - **Metadata cost**: per sub-field (`input`, `output`, `cacheRead`, `cacheWrite`); catalog pricing
   tiers are kept only when no rate came from the config or the gateway.
 
+## Review fixes (2026-10-09)
+
+A code review found eight issues; each was reproduced with a failing test first
+(`src/regressions.test.ts`) and fixed:
+
+1. Inference requests followed redirects, and fetch strips only `authorization` cross-origin, so
+   `x-api-key` could reach a redirect target. Every transport is now wrapped and forces
+   `redirect: "error"` (pi exposes no other hook than `options.fetch`).
+2. After a failed startup discovery pi's snapshot was restored with its *old* base URL and headers.
+   Restored models are now rebuilt against the current config (`rebindModels`).
+3. createProvider's static baseline could not shrink: a refresh could not remove startup models.
+   `createGatewayProvider` now owns the list (`getModels()` returns it; a successful refresh
+   replaces it and persists it through `context.publish`). Verified through pi's real `createModels`.
+4. release.yml hashed partial/empty downloads and carried on after the last retry. Fixed.
+5. Config model ids skipped validation; now the shared `isValidModelId` rule.
+6. An explicit `INFERENCE_GATEWAY_DEFAULT_API=openai-responses` could not override the file.
+7. README documents the Gemini `thought_signature` limitation.
+8. A `__proto__` model id corrupted config dicts, and `constructor` picked up an inherited
+   override. Dicts are built with `Object.fromEntries`; lookups are own-property only.
+
+Plus the follow-up from phase 4: `models[id].compat` merges over the inherited catalog compat, and
+`"compat": null` drops it.
+
+## Praxis support (2026-10-09)
+
+Praxis (github.com/praxis-proxy/praxis, AI gateway in `praxis-proxy/ai`, Apache-2.0) is the main
+target gateway. Facts from its docs that shaped the design:
+
+- Client auth is per deployment. The documented setups use `Authorization: Basic
+  base64(<user>:<password>)` (default user `gateway`); Praxis injects the backend token itself.
+  The deployment probed earlier wants `x-api-key` on `/v1/messages` and Bearer elsewhere.
+- `GET /v1/models` is passed through to one backend without merging: the list is partial by design,
+  so config-added models are a core feature, not a workaround.
+- Its documented clients are each pinned to one API (Codex → Responses, Claude Code → Messages,
+  OpenCode → Chat Completions); there is no pi integration. Its OpenCode plugin attaches credentials
+  only when the configured base URL equals `PRAXIS_BASE_URL`.
+
+What changed:
+
+1. **Auth schemes per target** (`anthropic-messages`, `openai-responses`, `openai-completions`,
+   `discovery`): `bearer` (alias `authorization`), `x-api-key` / any header name (raw token), and
+   `basic`. Defaults stay native per transport. Basic: username from `INFERENCE_GATEWAY_BASIC_USER`
+   / `usernameEnv` / `username` (default `gateway`, `:` rejected); password from
+   `INFERENCE_GATEWAY_BASIC_PASSWORD` / `passwordEnv`, or `INFERENCE_GATEWAY_BASIC_PASSWORD_FILE` /
+   `passwordFile` (re-read per request). Literal passwords are refused; credentials are never logged.
+   Every request's header now comes from the configured credentials for its scheme; pi's `apiKey`
+   (a placeholder under Basic) never reaches the wire.
+2. **Trusted-URL binding**: credentials from `INFERENCE_GATEWAY_*` variables attach only to the
+   provider whose base URL equals `INFERENCE_GATEWAY_BASE_URL` (normalised; trailing slash and `/v1`
+   ignored). A file provider naming one of them for another URL is refused with a warning and
+   never registered. Only the user-level config file is read, never a project `.pi/`.
+3. **Mock**: `--auth basic` requires `Basic gateway:test-pass` on every path and on `/v1/models`;
+   the default `--auth live` keeps the per-path x-api-key/Bearer behaviour.
+4. **README**: a Praxis walkthrough (both auth setups, why `/v1/models` is partial and how to add
+   models, `INFERENCE_GATEWAY_PROVIDER_ID=praxis`, known limits) and a Security section. The package
+   name and default provider id stay generic.
+
 ## pi integration
 
 - `createProvider()` from `@earendil-works/pi-ai` with `auth.apiKey` (ambient, **no** `login`,
