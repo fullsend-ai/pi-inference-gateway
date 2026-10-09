@@ -120,19 +120,24 @@ export function hashSessionId(sessionId: string): string {
  * (composed after the caller's) when the body has none.
  */
 function affinityOptions(
-  options: { sessionId?: string; onPayload?: (payload: unknown, model: Model<Api>) => unknown } | undefined,
+  options:
+    | { sessionId?: string; cacheRetention?: string; onPayload?: (payload: unknown, model: Model<Api>) => unknown }
+    | undefined,
   enabled: boolean,
 ): { sessionId?: string; onPayload?: (payload: unknown, model: Model<Api>) => Promise<unknown> } {
   const sessionId = options?.sessionId;
   if (!enabled || !sessionId) return {};
   const hashed = hashSessionId(sessionId);
   const callerOnPayload = options.onPayload;
+  // `cacheRetention: "none"` asks for no prompt caching; pi's own transports then send no cache
+  // key, and neither does this. The caller's onPayload still runs.
+  const addCacheKey = options.cacheRetention !== "none";
   return {
     sessionId: hashed,
     onPayload: async (payload, model) => {
       const replaced = callerOnPayload ? await callerOnPayload(payload, model) : undefined;
       const body = replaced === undefined ? payload : replaced;
-      if (model.api !== "openai-completions" || !isPlainObject(body) || body.prompt_cache_key !== undefined) return replaced;
+      if (!addCacheKey || model.api !== "openai-completions" || !isPlainObject(body) || body.prompt_cache_key !== undefined) return replaced;
       return { ...body, prompt_cache_key: hashed };
     },
   };

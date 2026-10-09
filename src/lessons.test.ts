@@ -388,6 +388,28 @@ describe("lesson 4: opt-in session affinity with a hashed session id", () => {
     assert.equal(byPath("/v1/responses")?.body.prompt_cache_key, HASHED);
   });
 
+  it("adds no prompt_cache_key when the request says cacheRetention: none, and still chains the caller's onPayload", async () => {
+    const cfg = config({ sessionAffinity: true });
+    const model = buildModel({ id: "m-chat", api: "openai-completions", endpoints: [], owners: [] }, cfg);
+    const bodies: Record<string, unknown>[] = [];
+    const fetch: FetchFunction = async (input, init) => {
+      bodies.push(JSON.parse(await new Request(input, init).text()));
+      return new Response(sseFor("/v1/chat/completions", "m-chat", "ok"), { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const provider = createProvider(gatewayProviderOptions(cfg, [model], { env: ENV }));
+    const context = normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 0 }] } satisfies Context);
+    const onPayload = (payload: unknown) => (typeof payload === "object" && payload !== null ? { ...payload, caller_field: 1 } : payload);
+    for (const cacheRetention of ["none", "short"] as const) {
+      for await (const _event of provider.streamSimple(model, context, { apiKey: "tok", fetch, sessionId: SESSION, cacheRetention, onPayload })) {
+        // drain
+      }
+    }
+    assert.equal(bodies[0].prompt_cache_key, undefined, "cacheRetention none");
+    assert.equal(bodies[0].caller_field, 1);
+    assert.equal(bodies[1].prompt_cache_key, HASHED);
+    assert.equal(bodies[1].caller_field, 1);
+  });
+
   it("a per-model compat override still wins", () => {
     const cfg = config({ sessionAffinity: true, models: { quiet: { api: "anthropic-messages", compat: { sendSessionAffinityHeaders: false } } } });
     const model = buildModel({ id: "quiet", endpoints: [], owners: [] }, cfg);
