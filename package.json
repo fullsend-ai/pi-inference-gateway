@@ -1,6 +1,6 @@
 {
   "name": "@fullsend-ai/pi-inference-gateway",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Any OpenAI- or Anthropic-compatible inference gateway (LiteLLM, agentgateway, ...) as one pi provider",
   "type": "module",
   "main": "src/index.ts",
