@@ -142,40 +142,85 @@ describe("D5: text/plain error bodies are shown, never a credential", () => {
   const text = (status: number, body: string, type = "text/plain") =>
     (async () => new Response(body, { status, headers: { "content-type": type } })) satisfies FetchFunction;
 
+  const TOKEN = "tok-abcdef-123456"; // gitleaks:allow (test fixture)
+  const omitted = (status: number) => ({ message: `model list request returned HTTP ${status}: (body omitted)` });
+
   it("discovery errors carry a text/plain body", async () => {
     await assert.rejects(
-      discoverModels(config(), { token: "tok", fetch: text(401, "authentication failure: no bearer token found") }),
+      discoverModels(config(), { token: TOKEN, fetch: text(401, "authentication failure: no bearer token found") }),
       { message: "model list request returned HTTP 401: authentication failure: no bearer token found" },
     );
   });
 
-  it("redacts even a short token", async () => {
-    await assert.rejects(discoverModels(config(), { token: "k9z", fetch: text(401, "token k9z rejected, key=k9z") }), {
-      message: "model list request returned HTTP 401: token [redacted] rejected, key=[redacted]",
+  for (const short of ["k", "k9", "k9z", "abcdefg"]) {
+    it(`omits the body when a credential is shorter than 8 characters (${short.length})`, async () => {
+      await assert.rejects(discoverModels(config(), { token: short, fetch: text(401, `token ${short} rejected`) }), omitted(401));
+    });
+  }
+
+  it("replaces embedded occurrences too", async () => {
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: text(401, `x${TOKEN}y and key=${TOKEN}`) }), {
+      message: "model list request returned HTTP 401: x[redacted]y and key=[redacted]",
     });
   });
 
-  it("redacts every credential the request carried, in any form", async () => {
-    const token = "s3cr3t-token-value"; // gitleaks:allow (test fixture)
-    await assert.rejects(discoverModels(config(), { token, fetch: text(401, `bad token Bearer ${token} for you`) }), (error: Error) => {
-      assert.doesNotMatch(error.message, /s3cr3t/);
-      assert.match(error.message, /bad token \[redacted\] for you/);
+  it("redacts a Bearer value and a custom-header value", async () => {
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: text(401, `got Bearer ${TOKEN}`) }), (error: Error) => {
+      assert.ok(!error.message.includes(TOKEN), error.message);
       return true;
     });
-    const basic = { username: "gateway", password: "pa55word-xyz" }; // gitleaks:allow (test fixture)
-    const encoded = Buffer.from("gateway:pa55word-xyz").toString("base64");
+    const cfg = config({ authHeaders: { discovery: "x-gateway-key" } });
+    await assert.rejects(discoverModels(cfg, { token: TOKEN, fetch: text(401, `x-gateway-key: ${TOKEN}`) }), (error: Error) => {
+      assert.ok(!error.message.includes(TOKEN), error.message);
+      return true;
+    });
+  });
+
+  describe("Basic credentials, in every form", () => {
+    const basic = { username: "gateway-user", password: "pa55word-xyz" }; // gitleaks:allow (test fixture)
+    const pair = "gateway-user:pa55word-xyz"; // gitleaks:allow (test fixture)
+    const encoded = Buffer.from(pair).toString("base64");
     const cfg = config({ authHeaders: { discovery: "basic" } });
-    await assert.rejects(
-      discoverModels(cfg, { credentials: { basic, problems: [] }, fetch: text(403, `got ${encoded} / gateway:pa55word-xyz / pa55word-xyz`) }),
-      (error: Error) => {
-        assert.doesNotMatch(error.message, /pa55word|Z2F0ZXdheTpw/);
+    for (const [name, body] of [
+      ["the header value", `Basic ${encoded}`],
+      ["the base64 pair", `got ${encoded}`],
+      ["the decoded pair", `got ${pair}`],
+      ["the password alone", "password pa55word-xyz is wrong"],
+      ["the username alone", "unknown user gateway-user"],
+    ] as const) {
+      it(`redacts ${name}`, async () => {
+        await assert.rejects(discoverModels(cfg, { credentials: { basic, problems: [] }, fetch: text(401, body) }), (error: Error) => {
+          for (const secret of [encoded, pair, "pa55word-xyz", "gateway-user"]) assert.ok(!error.message.includes(secret), error.message);
+          assert.match(error.message, /\[redacted\]/);
+          return true;
+        });
+      });
+    }
+
+    it("omits the body with the 7-character default username `gateway`", async () => {
+      const withDefault = { username: "gateway", password: "pa55word-xyz" }; // gitleaks:allow (test fixture)
+      await assert.rejects(
+        discoverModels(cfg, { credentials: { basic: withDefault, problems: [] }, fetch: text(401, "unknown user gateway") }),
+        omitted(401),
+      );
+    });
+  });
+
+  it("never keeps the prefix of a credential cut by the read limit", async () => {
+    for (let offset = 480; offset <= 512; offset++) {
+      // Whitespace collapses when the body is flattened, so a cut 500 bytes in can still be shown.
+      const body = `${" ".repeat(offset - 1)}a${TOKEN}${"b".repeat(600)}`;
+      await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: text(401, body) }), (error: Error) => {
+        for (let length = 1; length <= TOKEN.length; length++) {
+          assert.ok(!error.message.includes(`a${TOKEN.slice(0, length)}`), `offset ${offset}: prefix of length ${length} kept`);
+        }
         return true;
-      },
-    );
+      });
+    }
   });
 
   it("truncates long bodies and strips control characters", async () => {
-    await assert.rejects(discoverModels(config(), { token: "tok", fetch: text(500, `a\u0007b${"x".repeat(5000)}`) }), (error: Error) => {
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: text(500, `a\u0007b${"x".repeat(5000)}`) }), (error: Error) => {
       assert.ok(error.message.length < 400, String(error.message.length));
       assert.match(error.message, /HTTP 500: a bx+…$/);
       return true;
@@ -183,10 +228,10 @@ describe("D5: text/plain error bodies are shown, never a credential", () => {
   });
 
   it("does not echo JSON or HTML bodies", async () => {
-    await assert.rejects(discoverModels(config(), { token: "tok", fetch: text(404, `{"error":"x"}`, "application/json") }), {
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: text(404, `{"error":"x"}`, "application/json") }), {
       message: "model list request returned HTTP 404",
     });
-    await assert.rejects(discoverModels(config(), { token: "tok", fetch: text(502, "<html>bad</html>", "text/html") }), {
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: text(502, "<html>bad</html>", "text/html") }), {
       message: "model list request returned HTTP 502",
     });
   });

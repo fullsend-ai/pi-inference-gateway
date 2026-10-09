@@ -68,6 +68,11 @@ export interface FetchModelListOptions {
   fetch?: FetchFunction;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /**
+   * Every credential component the request carries (see credentialComponents), for redacting an
+   * error body. Default: every header value counts as one.
+   */
+  secrets?: readonly string[];
 }
 
 /** Read a response body as text, failing as soon as it exceeds `limit` bytes. */
@@ -102,65 +107,100 @@ async function readLimited(response: Response, limit: number): Promise<string> {
 
 const ERROR_DETAIL_BYTES = 512;
 const ERROR_DETAIL_CHARS = 200;
+/** A credential component shorter than this could hide inside ordinary words: no body is shown. */
+const MIN_REDACTABLE_SECRET = 8;
+export const BODY_OMITTED = "(body omitted)";
 
 /**
- * Every string a credential in `headers` could appear as in an error body: each header value, each
- * of its space-separated parts (`Bearer <token>` → `<token>`), and for Basic the decoded
- * `user:password` and the password alone. Only the scheme words and fragments under 3 characters
- * are left alone.
+ * Every form a credential can take in an error body: the token, the Basic username, password,
+ * `user:password` pair and its base64, and the exact auth header value sent (`Bearer <token>`,
+ * `Basic <base64>`, or a raw custom-header value).
  */
-function secretsIn(headers: Record<string, string>): string[] {
-  const secrets = new Set<string>();
-  for (const value of Object.values(headers)) {
-    const parts = value.split(/\s+/);
-    for (const part of [value, ...parts]) secrets.add(part);
-    if (parts[0]?.toLowerCase() === "basic" && parts[1]) {
-      const decoded = Buffer.from(parts[1], "base64").toString("utf8");
-      secrets.add(decoded);
-      secrets.add(decoded.slice(decoded.indexOf(":") + 1));
+export function credentialComponents(credentials: GatewayCredentials | undefined, headerValue?: string): string[] {
+  const components = new Set<string>();
+  if (credentials?.token) components.add(credentials.token);
+  if (credentials?.basic) {
+    const pair = `${credentials.basic.username}:${credentials.basic.password}`;
+    for (const part of [credentials.basic.username, credentials.basic.password, pair, Buffer.from(pair, "utf8").toString("base64")]) {
+      components.add(part);
     }
   }
-  return [...secrets]
-    .filter((secret) => secret.length >= 3 && !/^(bearer|basic)$/i.test(secret))
-    .sort((a, b) => b.length - a.length);
+  if (headerValue) components.add(headerValue);
+  components.delete("");
+  return [...components];
 }
 
 /**
- * The start of a `text/plain` error body, for the error message: at most ERROR_DETAIL_BYTES read,
- * control characters flattened, ERROR_DETAIL_CHARS shown, credentials from the request redacted.
- * JSON, HTML and anything else is not echoed. Never throws.
+ * Without an explicit list (a direct fetchModelList caller), every request header value is treated
+ * as a credential, with its space-separated parts and any Basic pair decoded.
  */
-async function plainTextDetail(response: Response, headers: Record<string, string>): Promise<string> {
+function componentsOfHeaders(headers: Record<string, string>): string[] {
+  const components = new Set<string>();
+  for (const value of Object.values(headers)) {
+    const parts = value.split(/\s+/).filter(Boolean);
+    components.add(value);
+    const scheme = parts[0]?.toLowerCase();
+    for (const part of scheme === "bearer" || scheme === "basic" ? parts.slice(1) : parts) components.add(part);
+    if (scheme === "basic" && parts[1]) {
+      const decoded = Buffer.from(parts[1], "base64").toString("utf8");
+      const colon = decoded.indexOf(":");
+      for (const part of [decoded, decoded.slice(0, colon), decoded.slice(colon + 1)]) components.add(part);
+    }
+  }
+  components.delete("");
+  return [...components];
+}
+
+/**
+ * The start of a `text/plain` error body for an error message — only when it can be made safe:
+ *   1. read at most ERROR_DETAIL_BYTES (+1, to know whether it was cut);
+ *   2. if any credential component is shorter than MIN_REDACTABLE_SECRET, show nothing but
+ *      BODY_OMITTED (a short secret cannot be told apart from ordinary text);
+ *   3. replace every occurrence of every component, embedded ones too, case-sensitively,
+ *      longest first;
+ *   4. if the read was cut, drop the last (longest component − 1) characters, so no credential
+ *      prefix survives the cut;
+ *   5. flatten control characters and whitespace, and show at most ERROR_DETAIL_CHARS.
+ * JSON, HTML and anything else is not echoed at all. Never throws.
+ */
+async function plainTextDetail(response: Response, secrets: readonly string[]): Promise<string> {
   const type = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (!type.startsWith("text/plain") || !response.body) {
     await response.body?.cancel().catch(() => {});
     return "";
   }
-  let text = "";
+  if (secrets.some((secret) => secret.length < MIN_REDACTABLE_SECRET)) {
+    await response.body.cancel().catch(() => {});
+    return BODY_OMITTED;
+  }
+  let text: string;
+  let truncated: boolean;
   try {
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let total = 0;
-    while (total < ERROR_DETAIL_BYTES) {
+    while (total <= ERROR_DETAIL_BYTES) {
       const { done, value } = await reader.read();
       if (done) break;
       chunks.push(value);
       total += value.byteLength;
     }
     await reader.cancel().catch(() => {});
+    truncated = total > ERROR_DETAIL_BYTES;
     text = new TextDecoder().decode(Buffer.concat(chunks).subarray(0, ERROR_DETAIL_BYTES));
   } catch {
     return "";
   }
-  // Whole occurrences only (not inside a longer alphanumeric run), so a 3-letter token does not
-  // mangle every word that contains it; a secret glued to `=`, `:`, quotes or spaces is caught.
-  for (const secret of secretsIn(headers)) {
-    const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    text = text.replace(new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9])`, "g"), "[redacted]");
-  }
+  const ordered = [...secrets].sort((a, b) => b.length - a.length);
+  for (const secret of ordered) text = text.split(secret).join("[redacted]");
+  // After redacting, not before: a credential that was complete in the read is already replaced,
+  // and one cut by the read limit is an unmatched prefix of at most (longest − 1) characters at the
+  // very end. Dropping first would instead cut complete credentials into unmatched prefixes.
+  if (truncated && ordered.length > 0) text = text.slice(0, Math.max(0, text.length - (ordered[0].length - 1)));
   const flat = text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").replace(/\s+/g, " ").trim();
   return flat.length > ERROR_DETAIL_CHARS ? `${flat.slice(0, ERROR_DETAIL_CHARS)}…` : flat;
 }
+
 
 /**
  * GET the model list. Redirects are an error (a gateway that redirects its model list is
@@ -187,7 +227,7 @@ export async function fetchModelList(options: FetchModelListOptions): Promise<un
     // Covers `redirect: "manual"` style opaque redirects from fetch implementations that do not
     // throw, and every gateway error. Only a short text/plain body is shown (gateways answer auth
     // and conversion failures that way), with every credential the request carried redacted.
-    const detail = await plainTextDetail(response, options.headers);
+    const detail = await plainTextDetail(response, options.secrets ?? componentsOfHeaders(options.headers));
     throw new Error(`model list request returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
   }
   let text: string;
@@ -824,9 +864,12 @@ export interface DiscoverOptions {
  * a list with no usable model (see assertUsable): an empty catalog is never published.
  */
 export async function discoverModels(config: GatewayConfig, options: DiscoverOptions): Promise<GatewayModel[]> {
+  const credentials: GatewayCredentials = options.credentials ?? { ...(options.token ? { token: options.token } : {}), problems: [] };
+  const sent = authHeaderEntry(authHeaderFor(config, "discovery"), credentials);
   const body = await fetchModelList({
     url: modelsUrl(config),
-    headers: discoveryHeaders(config, options.credentials ?? options.token),
+    headers: discoveryHeaders(config, credentials),
+    secrets: credentialComponents(credentials, sent?.[1]),
     ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
