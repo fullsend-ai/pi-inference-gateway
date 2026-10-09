@@ -289,6 +289,14 @@ async function discoveryCredentials(config: GatewayConfig, deps: RuntimeDeps): P
     const [first] = settled;
     throw first?.status === "rejected" ? first.reason : new Error("no credential could be read");
   }
+  // A rejected read must not vanish: that list goes out without its credential. Name the failure
+  // (which carries the variable or file, never the credential) so the user sees why.
+  for (const result of settled) {
+    if (result.status === "rejected") {
+      const reason: unknown = result.reason;
+      providerWarn(config, deps)(`could not read a credential: ${reason instanceof Error ? reason.message : String(reason)}`);
+    }
+  }
   const merged: GatewayCredentials = { problems: [] };
   for (const credentials of resolved) {
     if (credentials.token) merged.token = credentials.token;

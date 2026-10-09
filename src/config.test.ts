@@ -516,11 +516,18 @@ describe("discovery dialects", () => {
     assert.deepEqual(both.providers[0].discovery, ["openai", "anthropic"]);
   });
 
-  it('warns on an invalid "discovery" and keeps both', () => {
-    for (const value of [[], ["openai", "gemini"], "openai", [1]]) {
+  it('warns on an invalid "discovery" and keeps the valid entries, else openai only', () => {
+    const cases: Array<[unknown, string[]]> = [
+      [[], ["openai"]],
+      [["openai", "gemini"], ["openai"]],
+      [["anthropic", "gemini"], ["anthropic"]],
+      ["openai", ["openai"]],
+      [[1], ["openai"]],
+    ];
+    for (const [value, expected] of cases) {
       const { providers, warnings } = fileEntry(value);
-      assert.equal(providers[0].discovery, undefined);
-      assert.match(warnings.join("\n"), /"discovery" must be a non-empty list of openai, anthropic; using both/);
+      assert.deepEqual(providers[0].discovery, expected);
+      assert.match(warnings.join("\n"), new RegExp(`"discovery" must be a non-empty list of openai, anthropic; using ${expected.join(", ")}`));
     }
   });
 
@@ -529,8 +536,8 @@ describe("discovery dialects", () => {
     assert.deepEqual(warnings, []);
     assert.deepEqual(providers[0].discovery, ["anthropic"]);
     const invalid = envProvider({ ...BASE, INFERENCE_GATEWAY_DISCOVERY: "openai,bogus" }, HOME);
-    assert.equal(invalid.providers[0].discovery, undefined);
-    assert.match(invalid.warnings.join("\n"), /INFERENCE_GATEWAY_DISCOVERY: must be a non-empty list of openai, anthropic; using both/);
+    assert.deepEqual(invalid.providers[0].discovery, ["openai"]);
+    assert.match(invalid.warnings.join("\n"), /INFERENCE_GATEWAY_DISCOVERY: must be a non-empty list of openai, anthropic; using openai/);
   });
 
   it("the environment variable wins over the file", () => {

@@ -165,7 +165,8 @@ Each request carries exactly one credential. The lists are merged by id:
 One request failing is not fatal while the other returns a usable model. A 400, 401, 403, 404 or 405
 on the Anthropic-format request means the gateway has no such catalog, so there is no warning. Any
 other failure of either request gets one warning. When both fail, discovery fails with the
-OpenAI-format request's error. If a gateway rejects one of the two requests in a way that matters,
+OpenAI-format request's error. When only the Anthropic-format request succeeds, its models alone
+are listed and saved as the new snapshot, replacing the previous one. If a gateway rejects one of the two requests in a way that matters,
 turn it off with `"discovery": ["openai"]` (or `["anthropic"]`), or
 `INFERENCE_GATEWAY_DISCOVERY=openai`.
 

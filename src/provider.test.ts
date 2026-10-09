@@ -347,6 +347,22 @@ describe("Basic auth end to end (Praxis-style)", () => {
     assert.equal(anthropic.has("x-api-key"), false);
   });
 
+  it("discovery: warns when one credential kind cannot be read, without leaking the other", async () => {
+    const cfg = config({ passwordFile: "/run/gw-pass", authHeaders: { "anthropic-messages": "basic" } });
+    const warnings: string[] = [];
+    const fetch: FetchFunction = async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      return new Response(JSON.stringify({ data: headers.has("anthropic-version") ? [] : [{ id: "gpt-q" }] }));
+    };
+    const readText = async (path: string): Promise<string | undefined> => {
+      throw new Error(`cannot read ${path}`);
+    };
+    const result = await initialModels(cfg, { env: { GW_KEY: "tok-value" }, readText, fetch, warn: (message) => warnings.push(message) });
+    assert.deepEqual(result.models.map((entry) => entry.id), ["gpt-q"]);
+    assert.ok(warnings.some((message) => /could not read a credential: cannot read \/run\/gw-pass/.test(message)), warnings.join("\n"));
+    assert.equal(warnings.join().includes("tok-value"), false);
+  });
+
   it("never logs the password, and refuses a username with ':'", async () => {
     const warnings: string[] = [];
     const cfg = config({ apiKeyEnv: undefined, usernameEnv: "GW_USER", passwordEnv: "GW_PASS" });
