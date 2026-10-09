@@ -209,8 +209,27 @@ async function plainTextDetail(response: Response, secrets: readonly string[]): 
  */
 export async function fetchModelList(options: FetchModelListOptions): Promise<unknown> {
   const transport = options.fetch ?? globalThis.fetch;
-  const timeout = AbortSignal.timeout(options.timeoutMs ?? LIMITS.timeoutMs);
+  // A referenced timer, not AbortSignal.timeout(): that one's timer is unref'd, so on Node 22 a
+  // stalled request with nothing else keeping the event loop alive never reaches its timeout.
+  const timeoutMs = options.timeoutMs ?? LIMITS.timeoutMs;
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
+  const timeout = timeoutController.signal;
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  try {
+    return await fetchModelListWithin(options, transport, timeout, timeoutMs, signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchModelListWithin(
+  options: FetchModelListOptions,
+  transport: NonNullable<FetchModelListOptions["fetch"]>,
+  timeout: AbortSignal,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<unknown> {
   let response: Response;
   try {
     response = await transport(options.url, {
@@ -220,7 +239,7 @@ export async function fetchModelList(options: FetchModelListOptions): Promise<un
       signal,
     });
   } catch (error) {
-    if (timeout.aborted) throw new Error(`model list request timed out after ${options.timeoutMs ?? LIMITS.timeoutMs} ms`);
+    if (timeout.aborted) throw new Error(`model list request timed out after ${timeoutMs} ms`);
     throw new Error(`model list request failed: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (response.status < 200 || response.status >= 300) {
@@ -234,7 +253,7 @@ export async function fetchModelList(options: FetchModelListOptions): Promise<un
   try {
     text = await readLimited(response, LIMITS.maxBodyBytes);
   } catch (error) {
-    if (timeout.aborted) throw new Error(`model list request timed out after ${options.timeoutMs ?? LIMITS.timeoutMs} ms`);
+    if (timeout.aborted) throw new Error(`model list request timed out after ${timeoutMs} ms`);
     throw error;
   }
   try {
