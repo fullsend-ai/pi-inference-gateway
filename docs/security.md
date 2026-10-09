@@ -32,8 +32,9 @@ logs. Back to the [README](../README.md).
 - **Redirects are never followed**, on model requests or on discovery: a redirect is an error, so a
   key cannot be forwarded to another origin.
 - **Credentials are never logged.** Warnings name variables and files, never their values. A
-  discovery error shows the start of a `text/plain` error body only after replacing every form of
-  the credentials it sent; if any credential is shorter than 8 characters (Basic's default username
-  `gateway` is 7), the body is replaced by `(body omitted)`.
+  discovery error shows the start of a `text/plain` error body (or of a UTF-8 body sent without a
+  content-type) only after replacing every form of the credentials it sent; if any credential is
+  shorter than 8 characters (Basic's default username `gateway` is 7), the body is replaced by
+  `(body omitted)`.
 - **Model-request error bodies are printed by pi, not by this extension**, and are not redacted:
   a gateway or backend that echoes the request's credentials in an error can expose them there.

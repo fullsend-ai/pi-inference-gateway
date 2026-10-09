@@ -194,7 +194,8 @@ and the list pi saved from its last interactive refresh.
 
 - **Offline:** with `pi --offline` or `PI_OFFLINE` set (any value, as pi itself treats it), or
   `INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS=0`, the startup request is skipped silently and you get the
-  same fallback set.
+  same fallback set. On a fresh config directory that set has no saved list: see
+  [Sandboxes and CI](#sandboxes-and-ci).
 - **A list with no usable model is a failure**, not an empty catalog: an empty list, or one whose
   every entry is malformed, a wildcard or a non-chat model, keeps the last good list. So when a
   gateway that filters its list per caller (such as [agentgateway](gateways/agentgateway.md)) authorises zero
@@ -210,3 +211,23 @@ and the list pi saved from its last interactive refresh.
   saved with it. A model nothing identifies keeps the API it was saved with. With a current stamp,
   a restored model keeps its saved API even after you change `defaultApi`, until the next successful
   discovery; a per-model `models[id].api` always wins.
+
+## Sandboxes and CI
+
+A sandboxed or CI runner typically sets `PI_OFFLINE=1` and starts from a fresh
+`PI_CODING_AGENT_DIR`. Offline, the startup request is skipped (see
+[When the model list changes](#when-the-model-list-changes)), and a fresh directory has no list
+saved from an interactive refresh, because pi never ran one there. So the provider offers **only**
+the config's `fallbackModels` and config-added models: a model the gateway lists is not available
+unless the config names it too.
+
+Add every model the run uses, with its `api`:
+
+```bash
+export INFERENCE_GATEWAY_EXTRA_MODELS=claude-sonnet-5=anthropic-messages,gpt-6-luna=openai-responses
+```
+
+or as `models` entries with an `api` in `inference-gateway.json` in that directory. Per-model
+`compat`, `thinkingLevelMap`, `contextWindow` and `maxTokens` need the file. A model left out makes
+pi warn `Model "<id>" not found for provider "<provider>"` (see
+[Troubleshooting](troubleshooting.md)).

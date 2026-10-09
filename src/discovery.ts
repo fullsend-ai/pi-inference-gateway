@@ -152,8 +152,10 @@ function componentsOfHeaders(headers: Record<string, string>): string[] {
 }
 
 /**
- * The start of a `text/plain` error body for an error message — only when it can be made safe:
- *   1. read at most ERROR_DETAIL_BYTES (+1, to know whether it was cut);
+ * The start of a `text/plain` error body, or of one with no (or an empty) content-type, for an
+ * error message — only when it can be made safe:
+ *   1. read at most ERROR_DETAIL_BYTES (+1, to know whether it was cut); an untyped body must be
+ *      valid UTF-8 (a multi-byte character cut by the limit is fine), else nothing is shown;
  *   2. if any credential component is shorter than MIN_REDACTABLE_SECRET, show nothing but
  *      BODY_OMITTED (a short secret cannot be told apart from ordinary text);
  *   3. replace every occurrence of every component, embedded ones too, case-sensitively,
@@ -161,11 +163,13 @@ function componentsOfHeaders(headers: Record<string, string>): string[] {
  *   4. if the read was cut, drop the last (longest component − 1) characters, so no credential
  *      prefix survives the cut;
  *   5. flatten control characters and whitespace, and show at most ERROR_DETAIL_CHARS.
- * JSON, HTML and anything else is not echoed at all. Never throws.
+ * JSON, HTML and any other declared type is not echoed at all. Never throws.
  */
 async function plainTextDetail(response: Response, secrets: readonly string[]): Promise<string> {
-  const type = response.headers.get("content-type")?.toLowerCase() ?? "";
-  if (!type.startsWith("text/plain") || !response.body) {
+  const type = response.headers.get("content-type")?.trim().toLowerCase() ?? "";
+  // Some gateways answer a failed request with a short message and no content-type at all.
+  const untyped = type === "";
+  if (!(untyped || type.startsWith("text/plain")) || !response.body) {
     await response.body?.cancel().catch(() => {});
     return "";
   }
@@ -187,7 +191,12 @@ async function plainTextDetail(response: Response, secrets: readonly string[]): 
     }
     await reader.cancel().catch(() => {});
     truncated = total > ERROR_DETAIL_BYTES;
-    text = new TextDecoder().decode(Buffer.concat(chunks).subarray(0, ERROR_DETAIL_BYTES));
+    const bytes = Buffer.concat(chunks).subarray(0, ERROR_DETAIL_BYTES);
+    // Nothing says an untyped body is text: a fatal decoder throws on binary, and the catch below
+    // then shows nothing. `stream` keeps a character cut by the read limit from counting as invalid.
+    text = untyped
+      ? new TextDecoder("utf-8", { fatal: true }).decode(bytes, { stream: truncated })
+      : new TextDecoder().decode(bytes);
   } catch {
     return "";
   }
@@ -244,8 +253,9 @@ async function fetchModelListWithin(
   }
   if (response.status < 200 || response.status >= 300) {
     // Covers `redirect: "manual"` style opaque redirects from fetch implementations that do not
-    // throw, and every gateway error. Only a short text/plain body is shown (gateways answer auth
-    // and conversion failures that way), with every credential the request carried redacted.
+    // throw, and every gateway error. Only a short text/plain or untyped body is shown (gateways
+    // answer auth and conversion failures that way), with every credential the request carried
+    // redacted.
     const detail = await plainTextDetail(response, options.secrets ?? componentsOfHeaders(options.headers));
     throw new Error(`model list request returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
   }
