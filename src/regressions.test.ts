@@ -348,6 +348,55 @@ describe("review 9: configured auth header names never carry stale or extra cred
   });
 });
 
+describe("review 10: user compat overrides are type-checked against pi's compat types", () => {
+  it("rejects allowedFallbackModels and wrong-typed known flags with warnings", () => {
+    const { providers, warnings } = parseConfigFile(
+      {
+        providers: {
+          gw: {
+            baseUrl: "https://gw.example.com",
+            models: {
+              c: {
+                api: "anthropic-messages",
+                compat: { allowedFallbackModels: "x", supportsTemperature: "yes", sessionAffinityFormat: "openai", forceAdaptiveThinking: true, someFutureFlag: 3 },
+              },
+              d: { api: "openai-completions", compat: { maxTokensField: "max_out", thinkingFormat: "zai", vllmPriority: "high", chatTemplateKwargs: "x" } },
+            },
+          },
+        },
+      },
+      "/home/user",
+    );
+    const { models } = providers[0];
+    assert.deepEqual(models.c.compat, { forceAdaptiveThinking: true, someFutureFlag: 3 }, "unknown keys pass through");
+    assert.deepEqual(models.d.compat, { thinkingFormat: "zai" });
+    assert.equal(warnings.length, 6);
+    assert.ok(warnings.some((warning) => /allowedFallbackModels/.test(warning)));
+  });
+
+  it("a user allowedFallbackModels never reaches the Anthropic transport", async () => {
+    const cfg = config({ models: { c: { api: "anthropic-messages", compat: { allowedFallbackModels: "x" } } } });
+    const built = buildModel({ id: "c", endpoints: [], owners: [] }, cfg);
+    assert.equal(built.compat !== undefined && "allowedFallbackModels" in built.compat, false);
+    const provider = createGatewayProvider(cfg, { models: [built], fresh: true }, { env: ENV });
+    const fetch: FetchFunction = async (input, init) => {
+      const request = new Request(input, init);
+      const body = JSON.parse(await request.text());
+      return new Response(sseFor("/v1/messages", String(body.model), "ok"), { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const message = await provider.streamSimple(built, CONTEXT, { apiKey: "tok", fetch, maxRetries: 0 }).result();
+    assert.equal(message.stopReason, "stop", message.errorMessage ?? "");
+  });
+
+  it("drops a flag that is valid for another API but wrong for this one", () => {
+    // sessionAffinityFormat "openai" is valid on the OpenAI transports, not on Anthropic Messages.
+    const cfg = config({ models: { c: { compat: { sessionAffinityFormat: "openai" } } } });
+    const built = buildModel({ id: "c", endpoints: [], owners: ["anthropic"] }, cfg);
+    assert.equal(built.api, "anthropic-messages");
+    assert.equal(built.compat !== undefined && "sessionAffinityFormat" in built.compat, false);
+  });
+});
+
 describe("review 11: each request resolves only the credential its scheme needs", () => {
   const unreadable = (path: string) => async (file: string) => {
     if (file === path) throw Object.assign(new Error(`EACCES: permission denied, open '${file}'`), { code: "EACCES" });

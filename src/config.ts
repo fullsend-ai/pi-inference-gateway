@@ -5,6 +5,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { validateCompat } from "./compat.ts";
 
 /** The three pi transports a gateway model can be routed to. */
 export type GatewayApi = "anthropic-messages" | "openai-responses" | "openai-completions";
@@ -285,7 +286,9 @@ function parseModelOverride(raw: unknown, where: string, warnings: string[]): Mo
         }
         flags.push([key, value]);
       }
-      override.compat = Object.fromEntries(flags);
+      const checked = validateCompat(Object.fromEntries(flags), override.api);
+      for (const problem of checked.problems) warnings.push(`${where}: ${problem}`);
+      override.compat = checked.kept;
     } else {
       warnings.push(`${where}: "compat" must be an object of flags, or null to drop pi's catalog compat; ignored`);
     }

@@ -5,6 +5,7 @@
 
 import { hasApi } from "@earendil-works/pi-ai";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
+import { validateCompat } from "./compat.ts";
 import type {
   AnthropicMessagesCompat,
   AnyModel,
@@ -494,10 +495,17 @@ interface ModelCore {
  * everything; an object is merged over the catalog's flags. `empty` is the typed `{}` to merge
  * into — the override's keys are the user's to choose, and pi ignores keys it does not know.
  */
-function compatFor<T extends object>(empty: T, catalog: T | undefined, override: CompatOverride | null | undefined): T | undefined {
+function compatFor<T extends object>(
+  empty: T,
+  catalog: T | undefined,
+  override: CompatOverride | null | undefined,
+  api: GatewayApi,
+): T | undefined {
   if (override === null) return undefined;
   if (override === undefined) return catalog;
-  return Object.assign(empty, catalog, override);
+  // Re-checked against the final transport: the config may not have named the API, and a value
+  // valid on one transport (sessionAffinityFormat "openai") can be wrong on another.
+  return Object.assign(empty, catalog, validateCompat(override, api).kept);
 }
 
 function withApi(
@@ -512,17 +520,17 @@ function withApi(
   switch (api) {
     case "anthropic-messages": {
       const same = catalog && hasApi(catalog, "anthropic-messages") ? catalog : undefined;
-      const compat = compatFor<AnthropicMessagesCompat>({}, anthropicCompat(same?.compat), override);
+      const compat = compatFor<AnthropicMessagesCompat>({}, anthropicCompat(same?.compat), override, api);
       return { ...core, api, ...thinking(same?.thinkingLevelMap), ...(compat ? { compat } : {}) };
     }
     case "openai-responses": {
       const same = catalog && hasApi(catalog, "openai-responses") ? catalog : undefined;
-      const compat = compatFor<OpenAIResponsesCompat>({}, same?.compat, override);
+      const compat = compatFor<OpenAIResponsesCompat>({}, same?.compat, override, api);
       return { ...core, api, ...thinking(same?.thinkingLevelMap), ...(compat ? { compat } : {}) };
     }
     case "openai-completions": {
       const same = catalog && hasApi(catalog, "openai-completions") ? catalog : undefined;
-      const compat = compatFor<OpenAICompletionsCompat>({}, same?.compat, override);
+      const compat = compatFor<OpenAICompletionsCompat>({}, same?.compat, override, api);
       return { ...core, api, ...thinking(same?.thinkingLevelMap), ...(compat ? { compat } : {}) };
     }
   }
