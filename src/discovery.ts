@@ -596,10 +596,11 @@ export function baseUrlFor(api: GatewayApi, root: string): string {
 // --- metadata ---------------------------------------------------------------------------------
 
 /**
- * `allowedFallbackModels` makes pi add a `fallbacks` field to the Anthropic request body. That is
- * an api.anthropic.com feature; a gateway forwarding to any other Claude host (Vertex, Bedrock, a
- * second proxy) answers 400 `fallbacks: Extra inputs are not permitted` — the sibling
- * pi-anthropic-vertex extension hit exactly this. Every other catalog compat key is copied as-is.
+ * `allowedFallbackModels` is not a request-shape flag but a list of *model ids*, which pi sends as a
+ * `fallbacks` body field. The ids are those of pi's catalog provider, while every id this provider
+ * sends is the gateway's own, and the gateway picks backends itself. So it is never copied (the
+ * general rule: catalog compat that names other models is identity data, not transport behaviour).
+ * Every other catalog compat key is copied as-is; switching one off is the config's job.
  */
 function anthropicCompat(compat: AnthropicMessagesCompat | undefined): AnthropicMessagesCompat | undefined {
   if (!compat) return undefined;

@@ -237,6 +237,31 @@ What changed:
    models, `INFERENCE_GATEWAY_PROVIDER_ID=praxis`, known limits) and a Security section. The package
    name and default provider id stay generic.
 
+## Generality audit (2026-10-09)
+
+Rule (AGENTS.md): no dependency-specific workarounds in code. A dependency problem is handled by
+config the user sets, a README troubleshooting entry, and an upstream issue. Every branch in `src/`
+keyed on a vendor, model id, owner or backend:
+
+| Branch | Where | Kind | Decision | Why |
+|---|---|---|---|---|
+| Gateway `api` / endpoint hints | `selectApi`, `apiFromEndpoints` | routing | kept | The gateway describing its own models. |
+| pi catalog under `anthropic` → messages, `openai` → responses, other → completions | `selectApi`, `findCatalogModel`, `CATALOG_PRIORITY` | routing | kept | Describes which protocol a model speaks; a gateway exposes only the three. |
+| `claude-` id prefix → messages | `isClaudeId` | routing | kept | Describes the model family's native protocol. |
+| Owner hints (`anthropic*`, `openai*`, `azure`) | `isAnthropicOwner`, `isOpenAIOwner` | routing | kept | Describes the model. |
+| `AMBIGUOUS_OWNERS` (`vertex`, `bedrock`, `openrouter`, `system`, ...) | `discovery.ts` | routing | kept | Hosting/aggregator owners say nothing about the protocol. |
+| `compat` / `thinkingLevelMap` copied only from a catalog entry on the same transport | `withApi` | metadata | kept | General: both describe how one transport shapes a request. |
+| `allowedFallbackModels` never copied, refused in config | `anthropicCompat`, `validateCompat` | metadata | kept, reworded | General: it is a list of pi-catalog model ids (identity data, not a transport flag); the gateway has its own ids and routing. No backend named. |
+| `supportsMidConvoEffort` (E1) | — | dependency bug | config + README, no code | A Claude backend that is not Anthropic's own API may reject pi's effort-only system message; users set `compat.supportsMidConvoEffort: false`. pi-ai documents catalog compat as describing its exact first-party transport, which gives no data-driven "first-party-only" list. |
+| `reasoning_effort` enum clamp (D6) | — | dependency bug | converted: `models[id].thinkingLevelMap` config + README | The first version filtered catalog maps to agentgateway's enum in code; replaced before commit by a per-model override. |
+| Wildcard ids (`*`) dropped (D3) | `parseModelList` | id validity | kept | General: a pattern is not a model id a request can name. |
+| Non-chat `mode`/`type` dropped (lesson 3) | `isNonChatEntry` | model description | kept | General: describes the model kind (LiteLLM's field names are a convention many gateways share). |
+| text/plain error bodies in discovery errors (D5) | `plainTextDetail` | error display | kept | General: any gateway; credentials redacted. |
+| Native auth header per transport | `NATIVE_AUTH_HEADERS` | protocol | kept | Describes each protocol; every target is overridable. |
+| Basic username default `gateway` | `DEFAULT_BASIC_USERNAME` | default | kept | A default value only (Praxis's documented one); overridable. |
+| Gemini `thought_signature` replay (E6) | — | dependency bug | README limitation + upstream issue | Belongs in pi's chat-completions transport; only a generic "replay unknown provider fields for any model" hook would be acceptable here. |
+| vLLM `thinking.budget_tokens` (E3), Vertex structured-output org policy (E2) | — | dependency bug | README only | `compat.forceAdaptiveThinking` / `compat.supportsStrictTools` per model. |
+
 ## pi integration
 
 - `createProvider()` from `@earendil-works/pi-ai` with `auth.apiKey` (ambient, **no** `login`,

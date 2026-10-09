@@ -60,6 +60,11 @@ npm run ci
   pi's built-in catalog.
 - **Model ids are the gateway's ids, verbatim** — `vendor/model` included. Only the pi-catalog lookup
   strips a vendor prefix.
+- **No dependency-specific workarounds in code.** A gateway, backend or pi-transport problem is
+  handled by config the user sets (`compat`, `thinkingLevelMap`, `contextWindow`, `maxTokens`,
+  `authHeader` per model or API), a README troubleshooting entry, and an upstream issue to the
+  dependency that owns the bug. No branch keyed on a vendor, model id or backend unless it routes or
+  describes models; record every such branch in PLAN.md, "Generality audit".
 - **Sanitise everything from the wire** — see `LIMITS` in `src/discovery.ts`. Never follow a redirect
   on discovery (`redirect: "error"`): it would carry the token to another origin.
 - **Silence when unconfigured.** No base URL in the environment and no config file means no output

@@ -128,14 +128,15 @@ export interface CompatValidation {
  * Check a user compat override. With an `api`, known keys must match that transport's type; without
  * one (the transport is decided later), a known key is kept when any transport that declares it
  * accepts the value — buildModel re-checks against the final transport. `allowedFallbackModels` is
- * always refused: pi turns it into a `fallbacks` body field that only api.anthropic.com accepts.
+ * always refused: it is a list of model ids, not a flag, and the gateway does its own routing (see
+ * anthropicCompat in discovery.ts).
  */
 export function validateCompat(override: CompatOverride, api?: GatewayApi): CompatValidation {
   const kept: Array<[string, Flag]> = [];
   const problems: string[] = [];
   for (const [key, value] of Object.entries(override)) {
     if (key === "allowedFallbackModels") {
-      problems.push(`compat.allowedFallbackModels is not supported (pi sends it as a \`fallbacks\` request field); ignored`);
+      problems.push(`compat.allowedFallbackModels is not supported (a list of model ids sent as a \`fallbacks\` request field; the gateway routes models itself); ignored`);
       continue;
     }
     const checks = (api ? [api] : ALL_APIS)

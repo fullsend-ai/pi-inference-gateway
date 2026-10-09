@@ -111,8 +111,15 @@ See README, "How each model gets its API", for the order. Two points behind it:
 
 Metadata is merged per field: config → gateway fields → pi's built-in model → defaults. `compat` and
 `thinkingLevelMap` are copied only from a catalog entry on the **same** transport (they describe how
-that transport shapes a request), and `allowedFallbackModels` never: pi turns it into a `fallbacks`
-body field, which non-Anthropic Claude hosts reject with a 400.
+that transport shapes a request), and `allowedFallbackModels` never: it is a list of pi-catalog model
+ids sent as a `fallbacks` body field, and a gateway has its own ids and routing. The user's
+`models[id].compat` and `models[id].thinkingLevelMap` are merged over the copies.
+
+**No dependency-specific workarounds in code.** When a gateway, backend or pi transport rejects
+something, the fix is config the user sets (`compat`, `thinkingLevelMap`, `contextWindow`,
+`maxTokens`, `authHeader`), a README troubleshooting entry, and an issue to the project that owns
+the bug. Routing heuristics (endpoint hints, owners, pi's catalog, the `claude-` id) describe models
+and stay. PLAN.md, "Generality audit", lists every vendor-, id- or backend-specific branch.
 
 ## The CI matrix replaces a compat file
 
