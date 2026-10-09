@@ -3,9 +3,11 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createModels, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { createHash } from "node:crypto";
+import { createModels, createProvider, InMemoryModelsStore, normalizeContext } from "@earendil-works/pi-ai";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
-import type { FetchFunction, ModelsPublication, Provider, RefreshModelsContext } from "@earendil-works/pi-ai";
+import type { Context, FetchFunction, ModelsPublication, Provider, RefreshModelsContext } from "@earendil-works/pi-ai";
+import { sseFor } from "./test-fixtures.ts";
 import { loadConfig, type GatewayApi, type GatewayConfig } from "./config.ts";
 import { LIMITS, buildModel, discoverModels, modelsFromList, parseModelEntry, parseModelList, type GatewayModel } from "./discovery.ts";
 import {
@@ -13,6 +15,7 @@ import {
   SNAPSHOT_STAMP,
   createGatewayProvider,
   factoryDiscovery,
+  gatewayProviderOptions,
   initialModels,
   registerGateways,
 } from "./provider.ts";
@@ -275,6 +278,90 @@ describe("lesson 6: maxTokens never exceeds contextWindow; placeholder windows a
     assert.deepEqual(modelsFromList({ data: [{ id: catalogModel.id, context_window: catalogModel.contextWindow }] }, config()).warnings, []);
     const overridden = config({ models: { [catalogModel.id]: { contextWindow: 8192 } } });
     assert.deepEqual(modelsFromList({ data: [{ id: catalogModel.id, context_window: 8192 }] }, overridden).warnings, []);
+  });
+});
+
+describe("lesson 4: opt-in session affinity with a hashed session id", () => {
+  const SESSION = "raw-session-id-1234";
+  const HASHED = `pi-${createHash("sha256").update(SESSION).digest("hex").slice(0, 32)}`;
+  const AFFINITY_HEADERS = ["x-session-affinity", "x-session-id", "session_id", "x-client-request-id"];
+
+  async function requests(cfg: GatewayConfig) {
+    const calls: { path: string; headers: Headers; body: Record<string, unknown> }[] = [];
+    const fetch: FetchFunction = async (input, init) => {
+      const request = new Request(input, init);
+      const body: Record<string, unknown> = JSON.parse(await request.text());
+      const path = new URL(request.url).pathname;
+      calls.push({ path, headers: request.headers, body });
+      return new Response(sseFor(path, String(body.model), "ok"), { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const models = (["anthropic-messages", "openai-responses", "openai-completions"] as const).map((api) =>
+      buildModel({ id: `m-${api}`, api, endpoints: [], owners: [] }, cfg),
+    );
+    const provider = createProvider(gatewayProviderOptions(cfg, models, { env: ENV }));
+    const context = normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 0 }] } satisfies Context);
+    for (const model of models) {
+      for await (const _event of provider.streamSimple(model, context, { apiKey: "tok", fetch, sessionId: SESSION })) {
+        // drain
+      }
+    }
+    return calls;
+  }
+
+  it("is off by default: no affinity header on Messages or Chat Completions, no cache key on chat", async () => {
+    const calls = await requests(config());
+    const messages = calls.find((call) => call.path === "/v1/messages");
+    const chat = calls.find((call) => call.path === "/v1/chat/completions");
+    assert.ok(messages && chat);
+    for (const call of [messages, chat]) {
+      for (const name of AFFINITY_HEADERS) assert.equal(call.headers.get(name), null, `${call.path} ${name}`);
+    }
+    assert.equal(chat.body.prompt_cache_key, undefined);
+    const responses = calls.find((call) => call.path === "/v1/responses");
+    assert.equal(responses?.body.prompt_cache_key, SESSION, "control: pi's Responses transport sends the raw id natively");
+  });
+
+  it("when on, every transport carries only the hashed id: affinity headers and prompt_cache_key", async () => {
+    const calls = await requests(config({ sessionAffinity: true }));
+    assert.equal(calls.length, 3);
+    for (const call of calls) {
+      const raw = JSON.stringify([...call.headers]) + JSON.stringify(call.body);
+      assert.ok(!raw.includes(SESSION), `${call.path} leaks the raw session id`);
+    }
+    const byPath = (path: string) => calls.find((call) => call.path === path);
+    assert.equal(byPath("/v1/messages")?.headers.get("x-session-affinity"), HASHED);
+    assert.equal(byPath("/v1/chat/completions")?.headers.get("x-session-affinity"), HASHED);
+    assert.equal(byPath("/v1/chat/completions")?.body.prompt_cache_key, HASHED);
+    assert.equal(byPath("/v1/responses")?.body.prompt_cache_key, HASHED);
+  });
+
+  it("a per-model compat override still wins", () => {
+    const cfg = config({ sessionAffinity: true, models: { quiet: { api: "anthropic-messages", compat: { sendSessionAffinityHeaders: false } } } });
+    const model = buildModel({ id: "quiet", endpoints: [], owners: [] }, cfg);
+    assert.equal(model.api === "anthropic-messages" ? model.compat?.sendSessionAffinityHeaders : undefined, false);
+  });
+
+  it("is configured by the file key or INFERENCE_GATEWAY_SESSION_AFFINITY", async () => {
+    const fromFile = await loadConfig({
+      env: {},
+      home: "/home/user",
+      readText: async () => JSON.stringify({ providers: { gw: { baseUrl: "https://gateway.example.com", sessionAffinity: true } } }),
+    });
+    assert.equal(fromFile.providers[0].sessionAffinity, true);
+    for (const [value, expected] of [["1", true], ["true", true], ["0", false], ["no", false]] as const) {
+      const fromEnv = await loadConfig({
+        env: { INFERENCE_GATEWAY_BASE_URL: "https://gateway.example.com", INFERENCE_GATEWAY_SESSION_AFFINITY: value },
+        home: "/home/user",
+        readText: async () => undefined,
+      });
+      assert.equal(fromEnv.providers[0].sessionAffinity, expected, value);
+    }
+    const bad = await loadConfig({
+      env: { INFERENCE_GATEWAY_BASE_URL: "https://gateway.example.com", INFERENCE_GATEWAY_SESSION_AFFINITY: "maybe" },
+      home: "/home/user",
+      readText: async () => undefined,
+    });
+    assert.match(bad.warnings.join("\n"), /INFERENCE_GATEWAY_SESSION_AFFINITY: must be/);
   });
 });
 

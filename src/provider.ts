@@ -3,10 +3,13 @@
 // over /v1/responses or /v1/chat/completions. pi's lazy transports do all the streaming; this file
 // only decides which one a model uses, which token it carries and in which header.
 
+import { createHash } from "node:crypto";
 import { createProvider } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi, openAICompletionsApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
 import type {
+  Api,
   ApiKeyAuth,
+  Model,
   AuthResult,
   CreateProviderOptions,
   FetchFunction,
@@ -105,6 +108,40 @@ export function createGatewayFetch({
   };
 }
 
+/** `pi-` + 32 hex characters of SHA-256: stable per session, and the raw pi session id never leaves. */
+export function hashSessionId(sessionId: string): string {
+  return `pi-${createHash("sha256").update(sessionId).digest("hex").slice(0, 32)}`;
+}
+
+/**
+ * Request-option changes for opt-in session affinity, or none. pi derives every affinity header and
+ * `prompt_cache_key` from `options.sessionId`, so hashing it here covers all of them. Chat
+ * Completions sends `prompt_cache_key` only to api.openai.com, so it is added through `onPayload`
+ * (composed after the caller's) when the body has none.
+ */
+function affinityOptions(
+  options: { sessionId?: string; onPayload?: (payload: unknown, model: Model<Api>) => unknown } | undefined,
+  enabled: boolean,
+): { sessionId?: string; onPayload?: (payload: unknown, model: Model<Api>) => Promise<unknown> } {
+  const sessionId = options?.sessionId;
+  if (!enabled || !sessionId) return {};
+  const hashed = hashSessionId(sessionId);
+  const callerOnPayload = options.onPayload;
+  return {
+    sessionId: hashed,
+    onPayload: async (payload, model) => {
+      const replaced = callerOnPayload ? await callerOnPayload(payload, model) : undefined;
+      const body = replaced === undefined ? payload : replaced;
+      if (model.api !== "openai-completions" || !isPlainObject(body) || body.prompt_cache_key !== undefined) return replaced;
+      return { ...body, prompt_cache_key: hashed };
+    },
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * One of pi's transports with every request — streaming and deferred — routed through
  * {@link createGatewayFetch}. Built per call so a caller-supplied `options.fetch` is composed
@@ -116,14 +153,16 @@ export function withGatewayFetch(
   scheme: string,
   credentials: CredentialSource,
   strip: Iterable<string> = ["authorization", "x-api-key"],
+  { sessionAffinity = false }: { sessionAffinity?: boolean } = {},
 ): ProviderStreams {
   const fetchFor = (fetch: FetchFunction | undefined) =>
     createGatewayFetch({ scheme, credentials, strip, ...(fetch ? { baseFetch: fetch } : {}) });
   const wrapped: ProviderStreams = {
     ...base,
-    stream: (model, context, options) => base.stream(model, context, { ...options, fetch: fetchFor(options?.fetch) }),
+    stream: (model, context, options) =>
+      base.stream(model, context, { ...options, ...affinityOptions(options, sessionAffinity), fetch: fetchFor(options?.fetch) }),
     streamSimple: (model, context, options) =>
-      base.streamSimple(model, context, { ...options, fetch: fetchFor(options?.fetch) }),
+      base.streamSimple(model, context, { ...options, ...affinityOptions(options, sessionAffinity), fetch: fetchFor(options?.fetch) }),
   };
   const { fetchDeferred, cancelDeferred } = base;
   if (fetchDeferred) {
@@ -149,7 +188,7 @@ export function gatewayStreams(config: GatewayConfig, deps: RuntimeDeps = {}): R
   const credentials = credentialSource(config, deps);
   const strip = [...credentialHeaderNames(config.authHeaders)];
   const transport = (api: GatewayApi, base: ProviderStreams) =>
-    withGatewayFetch(base, authHeaderFor(config, api), credentials, strip);
+    withGatewayFetch(base, authHeaderFor(config, api), credentials, strip, { sessionAffinity: config.sessionAffinity === true });
   return {
     "anthropic-messages": transport("anthropic-messages", anthropicMessagesApi()),
     "openai-responses": transport("openai-responses", openAIResponsesApi()),

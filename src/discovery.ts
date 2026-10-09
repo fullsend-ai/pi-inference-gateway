@@ -644,7 +644,11 @@ function withApi(
   core: ModelCore,
   catalog: Model<Api> | undefined,
   override: Pick<ModelOverride, "compat" | "thinkingLevelMap">,
+  sessionAffinity = false,
 ): GatewayModel {
+  // Opt-in affinity: pi's own switch for the affinity headers on the two transports that do not
+  // send them by default (Responses always does). The config's compat still wins per model.
+  const affinity = sessionAffinity ? { sendSessionAffinityHeaders: true } : {};
   // thinkingLevelMap and compat describe how a *transport* shapes a request, so they are only
   // copied from a catalog entry on the same transport. The config's map is merged over the copy
   // (`null` drops it): what a level is sent as is the user's call, not a per-gateway table here.
@@ -655,7 +659,9 @@ function withApi(
   switch (api) {
     case "anthropic-messages": {
       const same = catalog && hasApi(catalog, "anthropic-messages") ? catalog : undefined;
-      const compat = compatFor<AnthropicMessagesCompat>({}, anthropicCompat(same?.compat), override.compat, api);
+      const copied = anthropicCompat(same?.compat);
+      const base = sessionAffinity ? { ...copied, ...affinity } : copied;
+      const compat = compatFor<AnthropicMessagesCompat>({}, base, override.compat, api);
       return { ...core, api, ...thinking(same?.thinkingLevelMap), ...(compat ? { compat } : {}) };
     }
     case "openai-responses": {
@@ -665,7 +671,8 @@ function withApi(
     }
     case "openai-completions": {
       const same = catalog && hasApi(catalog, "openai-completions") ? catalog : undefined;
-      const compat = compatFor<OpenAICompletionsCompat>({}, same?.compat, override.compat, api);
+      const base = sessionAffinity ? { ...same?.compat, ...affinity } : same?.compat;
+      const compat = compatFor<OpenAICompletionsCompat>({}, base, override.compat, api);
       return { ...core, api, ...thinking(same?.thinkingLevelMap), ...(compat ? { compat } : {}) };
     }
   }
@@ -715,7 +722,7 @@ export function buildModel(entry: GatewayModelEntry, config: GatewayConfig): Gat
     maxTokens: Math.min(firstDefined(override.maxTokens, entry.maxTokens, catalog?.maxTokens) ?? DEFAULTS.maxTokens, contextWindow),
     ...(Object.keys(config.headers).length > 0 ? { headers: { ...config.headers } } : {}),
   };
-  return withApi(api, core, catalog, override);
+  return withApi(api, core, catalog, override, config.sessionAffinity === true);
 }
 
 /**

@@ -76,7 +76,16 @@ export const ENV = {
   authHeader: "INFERENCE_GATEWAY_AUTH_HEADER",
   extraModels: "INFERENCE_GATEWAY_EXTRA_MODELS",
   discoveryTimeoutMs: "INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS",
+  sessionAffinity: "INFERENCE_GATEWAY_SESSION_AFFINITY",
 } as const;
+
+/** `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitive; anything else is undefined. */
+export function parseBooleanFlag(raw: string): boolean | undefined {
+  const value = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  return undefined;
+}
 
 /** Per-model overrides from the config file. Every field wins over the gateway and pi's catalog. */
 export interface ModelOverride {
@@ -154,6 +163,11 @@ export interface GatewayConfig {
   models: Record<string, ModelOverride>;
   /** Raw model entries (same shapes the gateway returns) used when discovery fails. */
   fallbackModels: unknown[];
+  /**
+   * Opt-in: send pi's session id, hashed, as a session-affinity header on every transport and as
+   * `prompt_cache_key` on Chat Completions, so a gateway can pin a session to one backend and cache.
+   */
+  sessionAffinity?: boolean;
 }
 
 export interface ParseResult {
@@ -545,6 +559,10 @@ export function parseProviderEntry(
     if (Array.isArray(raw.fallbackModels)) config.fallbackModels = [...raw.fallbackModels];
     else warnings.push(`${where}: "fallbackModels" must be an array; ignored`);
   }
+  if (raw.sessionAffinity !== undefined) {
+    if (typeof raw.sessionAffinity === "boolean") config.sessionAffinity = raw.sessionAffinity;
+    else warnings.push(`${where}: "sessionAffinity" must be true or false; ignored`);
+  }
   return config;
 }
 
@@ -608,6 +626,13 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
   const rawExtra = env[ENV.extraModels]?.trim();
   const models = rawExtra ? parseExtraModelsEnv(rawExtra, warnings) : {};
 
+  let sessionAffinity: boolean | undefined;
+  const rawAffinity = env[ENV.sessionAffinity]?.trim();
+  if (rawAffinity) {
+    sessionAffinity = parseBooleanFlag(rawAffinity);
+    if (sessionAffinity === undefined) warnings.push(`${ENV.sessionAffinity}: must be 1/true/yes or 0/false/no; ignored`);
+  }
+
   const tokenFile = env[ENV.tokenFile]?.trim();
   const passwordFile = env[ENV.basicPasswordFile]?.trim();
   return {
@@ -628,6 +653,7 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
         exclude: [],
         models,
         fallbackModels: [],
+        ...(sessionAffinity !== undefined ? { sessionAffinity } : {}),
       },
     ],
     warnings,
@@ -671,6 +697,7 @@ export function mergeProviders(
       // Whether the variable was *supplied* decides, not its value: an explicit
       // INFERENCE_GATEWAY_DEFAULT_API=openai-responses must beat a file's openai-completions.
       defaultApi: envDefaultApiSet ? provider.defaultApi : file.defaultApi,
+      ...(provider.sessionAffinity !== undefined ? { sessionAffinity: provider.sessionAffinity } : {}),
       authHeaders: { ...file.authHeaders, ...provider.authHeaders },
       models: Object.fromEntries(
         [...new Set([...Object.keys(provider.models), ...Object.keys(file.models)])].map((modelId) => [
