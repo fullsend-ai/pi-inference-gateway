@@ -62,6 +62,44 @@ export function authHeaderFor(config: Pick<GatewayConfig, "authHeaders">, target
   return config.authHeaders[target] ?? NATIVE_AUTH_HEADERS[target];
 }
 
+/**
+ * The model-list formats discovery asks for, each a separate `GET {modelsPath}`:
+ *   - `openai`    → the `discovery` target's auth scheme; an OpenAI list (`{object:"list", data}`)
+ *   - `anthropic` → the `anthropic-messages` target's auth scheme plus `anthropic-version`; an
+ *                   Anthropic list (`{data, has_more, first_id, last_id}`)
+ * A gateway with one catalog per API dialect answers each with the models routable on that dialect.
+ */
+export type DiscoveryDialect = "openai" | "anthropic";
+
+export const DISCOVERY_DIALECTS: readonly DiscoveryDialect[] = ["openai", "anthropic"];
+
+function isDiscoveryDialect(value: unknown): value is DiscoveryDialect {
+  return typeof value === "string" && (DISCOVERY_DIALECTS as readonly string[]).includes(value);
+}
+
+/** The auth target whose scheme a dialect's list request uses. */
+export const DISCOVERY_DIALECT_TARGETS: Readonly<Record<DiscoveryDialect, AuthTarget>> = {
+  openai: "discovery",
+  anthropic: "anthropic-messages",
+};
+
+/** The dialects a provider queries: the configured ones, else both. */
+export function discoveryDialects(config: Pick<GatewayConfig, "discovery">): readonly DiscoveryDialect[] {
+  return config.discovery !== undefined && config.discovery.length > 0 ? config.discovery : DISCOVERY_DIALECTS;
+}
+
+/**
+ * A non-empty list of dialects (`["openai", "anthropic"]`), deduplicated and in canonical order, or
+ * undefined (with a warning naming `label`) when it is anything else.
+ */
+export function parseDiscoveryDialects(raw: unknown, label: string, warnings: string[]): DiscoveryDialect[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0 || !raw.every(isDiscoveryDialect)) {
+    warnings.push(`${label} must be a non-empty list of ${DISCOVERY_DIALECTS.join(", ")}; using both`);
+    return undefined;
+  }
+  return DISCOVERY_DIALECTS.filter((dialect) => raw.includes(dialect));
+}
+
 /** Basic auth's username when nothing sets one (Praxis's documented default). */
 export const DEFAULT_BASIC_USERNAME = "gateway";
 
@@ -78,6 +116,7 @@ export const ENV = {
   authHeader: "INFERENCE_GATEWAY_AUTH_HEADER",
   extraModels: "INFERENCE_GATEWAY_EXTRA_MODELS",
   discoveryTimeoutMs: "INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS",
+  discovery: "INFERENCE_GATEWAY_DISCOVERY",
   sessionAffinity: "INFERENCE_GATEWAY_SESSION_AFFINITY",
 } as const;
 
@@ -161,6 +200,8 @@ export interface GatewayConfig {
   headers: Record<string, string>;
   /** Path of the model list, relative to `baseUrl`. */
   modelsPath: string;
+  /** Model-list formats to request and merge (see DiscoveryDialect); undefined means both. */
+  discovery?: DiscoveryDialect[];
   include: string[];
   exclude: string[];
   /**
@@ -578,6 +619,10 @@ export function parseProviderEntry(
     if (typeof raw.modelsPath === "string" && /^\/[^\s?#]*$/.test(raw.modelsPath)) config.modelsPath = raw.modelsPath;
     else warnings.push(`${where}: "modelsPath" must be an absolute path such as /v1/models; using ${DEFAULT_MODELS_PATH}`);
   }
+  if (raw.discovery !== undefined) {
+    const dialects = parseDiscoveryDialects(raw.discovery, `${where}: "discovery"`, warnings);
+    if (dialects) config.discovery = dialects;
+  }
   if (raw.models !== undefined) {
     if (isRecord(raw.models)) {
       const models: Array<[string, ModelOverride]> = [];
@@ -722,6 +767,13 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
     if (sessionAffinity === undefined) warnings.push(`${ENV.sessionAffinity}: must be 1/true/yes or 0/false/no; ignored`);
   }
 
+  let discovery: DiscoveryDialect[] | undefined;
+  const rawDiscovery = env[ENV.discovery]?.trim();
+  if (rawDiscovery) {
+    const parts = rawDiscovery.split(",").map((part) => part.trim()).filter(Boolean);
+    discovery = parseDiscoveryDialects(parts, `${ENV.discovery}:`, warnings);
+  }
+
   const tokenFile = env[ENV.tokenFile]?.trim();
   const passwordFile = env[ENV.basicPasswordFile]?.trim();
   return {
@@ -738,6 +790,7 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
         defaultApi,
         headers: {},
         modelsPath: DEFAULT_MODELS_PATH,
+        ...(discovery !== undefined ? { discovery } : {}),
         include: [],
         exclude: [],
         models,
@@ -801,6 +854,7 @@ export function mergeProviders(
       // INFERENCE_GATEWAY_DEFAULT_API=openai-responses must beat a file's openai-completions.
       defaultApi: envDefaultApiSet ? provider.defaultApi : file.defaultApi,
       ...(provider.sessionAffinity !== undefined ? { sessionAffinity: provider.sessionAffinity } : {}),
+      ...(provider.discovery !== undefined ? { discovery: provider.discovery } : {}),
       authHeaders: { ...file.authHeaders, ...provider.authHeaders },
       models: Object.fromEntries(
         [...new Set([...Object.keys(provider.models), ...Object.keys(file.models)])].map((modelId) => [

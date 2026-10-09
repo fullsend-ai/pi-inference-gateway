@@ -39,10 +39,16 @@ export INFERENCE_GATEWAY_PROVIDER_ID=praxis      # model specs become praxis/<mo
 
 ## Add the models `/v1/models` does not list
 
-Praxis passes `GET /v1/models` through to **one** backend without merging, so the list is partial by
-design. Add the rest in `~/.pi/agent/inference-gateway.json` with the API each one is served on:
-Claude on Messages, GPT on Responses, Gemini and open-weight models on Chat Completions. Ids are sent
-to Praxis verbatim, `vendor/org/model` included.
+Praxis answers `GET /v1/models` from the deployment's `model_catalog` filters, one per API dialect.
+An OpenAI-format request (Bearer) gets the OpenAI-format catalog, and an Anthropic-format request
+(the Messages auth plus `anthropic-version`) gets the Anthropic-format catalog. The extension sends
+both requests and merges the lists; see
+[Discovery: both list formats](../configuration.md#discovery-both-list-formats). Models only on the
+Anthropic-format list go to Messages. When a list leaves out models that work, that is a gap in the
+deployment's catalog configuration, not part of Praxis's design. Until the catalog is fixed, add the
+missing models in `~/.pi/agent/inference-gateway.json` with the API each one is served on: Claude on
+Messages, GPT on Responses, Gemini and open-weight models on Chat Completions. Ids are sent to Praxis
+verbatim, `vendor/org/model` included.
 
 ## Walkthrough (pi 1.0.2, mock gateway in Basic mode)
 
@@ -77,9 +83,10 @@ $ pi -ne -e . --no-session -p --model praxis/oss/zai-org/glm-5-3 "say hi"
 hi from /v1/chat/completions as oss/zai-org/glm-5-3
 ```
 
-The mock lists only `claude-sonnet-5` and `gemini-3.5-flash` (both `owned_by: "vertex"`, as a
-single-backend pass-through would). The other two come from the config file. Its request log shows
-`authorization(Basic)` on every path, `/v1/models` included. The same run passes on pi 0.99.2, and
+The mock has one catalog per dialect. Its OpenAI-format list has only `gemini-3.5-flash`
+(`owned_by: "vertex"`), and its Anthropic-format list has only `claude-sonnet-5`. The other two
+models come from the config file. Its request log shows `authorization(Basic)` on every path,
+including both `/v1/models` requests. The same run passes on pi 0.99.2, and
 in the per-API mode (`node scripts/mock-gateway.mjs 47811`, `INFERENCE_GATEWAY_API_KEY=test-token`).
 
 ## Known limits with Praxis

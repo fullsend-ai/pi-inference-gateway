@@ -322,6 +322,31 @@ describe("Basic auth end to end (Praxis-style)", () => {
     assertOneAuthHeader(gpt.calls[0].headers, "authorization");
   });
 
+  it("discovery: Bearer on the OpenAI-format list, Basic on the Anthropic-format one, one credential each", async () => {
+    const cfg = config({ usernameEnv: "GW_USER", passwordEnv: "GW_PASS", authHeaders: { "anthropic-messages": "basic" } });
+    const sent: Headers[] = [];
+    const fetch: FetchFunction = async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      sent.push(headers);
+      return new Response(JSON.stringify({ data: headers.has("anthropic-version") ? [{ type: "model", id: "alias-q" }] : [{ id: "gpt-q" }] }));
+    };
+    const result = await initialModels(cfg, { env: { ...BASIC, GW_KEY: "tok" }, fetch, warn: (message) => assert.fail(message) });
+    assert.deepEqual(
+      result.models.map((entry) => [entry.id, entry.api]),
+      [
+        ["gpt-q", "openai-responses"],
+        ["alias-q", "anthropic-messages"],
+      ],
+    );
+    const openai = sent.find((headers) => !headers.has("anthropic-version"));
+    const anthropic = sent.find((headers) => headers.has("anthropic-version"));
+    assert.ok(openai && anthropic);
+    assertOneAuthHeader(openai, "authorization");
+    assert.equal(openai.get("authorization"), "Bearer tok");
+    assert.equal(anthropic.get("authorization"), "Basic Z2F0ZXdheTp0ZXN0LXBhc3M=");
+    assert.equal(anthropic.has("x-api-key"), false);
+  });
+
   it("never logs the password, and refuses a username with ':'", async () => {
     const warnings: string[] = [];
     const cfg = config({ apiKeyEnv: undefined, usernameEnv: "GW_USER", passwordEnv: "GW_PASS" });
@@ -407,7 +432,7 @@ describe("refresh: refreshModels, persisted snapshot", () => {
     const { context, persisted } = refreshContext({ allowNetwork: true });
     assert.ok(provider.refreshModels);
     await provider.refreshModels(context);
-    assert.deepEqual(urls, ["https://gw.example.com/v1/models"]);
+    assert.deepEqual(urls, ["https://gw.example.com/v1/models", "https://gw.example.com/v1/models"]);
     assert.deepEqual(
       provider.getModels().map((entry) => [entry.id, entry.api]),
       [["new-model", "anthropic-messages"]],
@@ -529,7 +554,7 @@ describe("registerGateways", () => {
       warn: () => assert.fail("no warnings expected"),
     });
     assert.deepEqual(ids, ["gateway"]);
-    assert.deepEqual(urls, ["http://127.0.0.1:4000/v1/models"]);
+    assert.deepEqual(urls, ["http://127.0.0.1:4000/v1/models", "http://127.0.0.1:4000/v1/models"]);
     assert.deepEqual(
       pi.providers[0].getModels().map((entry) => [entry.id, entry.api]),
       [

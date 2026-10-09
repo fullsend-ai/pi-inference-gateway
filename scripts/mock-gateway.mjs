@@ -7,20 +7,24 @@
 //
 // --auth live (default) and --auth basic behave like a front proxy that picks the backend from the
 // request path:
-//   GET  /v1/models            lists only a Claude and a Gemini model, both owned_by "vertex"
+//   GET  /v1/models            one list per format, like a gateway with a catalog per dialect:
+//                              the OpenAI-format list (no `anthropic-version`) has only a Gemini
+//                              model, owned_by "vertex"; the Anthropic-format list (with
+//                              `anthropic-version`, the /v1/messages auth) only a Claude model
 //   POST /v1/messages          Claude models
 //   POST /v1/responses         GPT / o-series models, none of them listed
 //   POST /v1/chat/completions  Gemini models
 // plus one open-weight model, `oss/zai-org/glm-5-3`, that is unlisted, served on all three paths
 // under the same id, and returns reasoning on each. Any other model/path pair is a 404.
-//   live:  x-api-key ONLY on /v1/messages (Bearer is a 401), Bearer everywhere else; the token is
-//          $MOCK_GATEWAY_TOKEN (default `test-token`)
+//   live:  x-api-key ONLY on /v1/messages and the Anthropic-format list (Bearer is a 401), Bearer
+//          everywhere else; the token is $MOCK_GATEWAY_TOKEN (default `test-token`)
 //   basic: `Authorization: Basic base64(gateway:<password>)` on every path, /v1/models included; the
 //          password is $MOCK_GATEWAY_PASSWORD (default `test-pass`) — the setup Praxis documents
 //
 // --auth agentgateway mimics agentgateway's `llm:` mode (github.com/agentgateway/agentgateway):
 //   GET /v1/models, /v1/models/<anything>  a synthesised list, every entry owned_by "openai", plus a
 //                                          literal `openai/*` wildcard entry
+//                                          (one list, whatever the `anthropic-version` header)
 //   Bearer only, on every path: x-api-key or no token → 401 text/plain
 //                                          `authentication failure: no bearer token found`
 //   routing by the body `model`; the path only picks the input format:
@@ -30,8 +34,8 @@
 //     any other listed model, any path     → accepted; `openai/<name>` matches the wildcard
 //     an unknown model                     → 404 JSON `model_not_found`
 //
-// Each request is logged as `<method> <path> auth=<header names> model=<id>` (auth shows header
-// names and the authorization scheme only, never a value).
+// Each request is logged as `<method> <path> auth=<header names> [anthropic-version] model=<id>`
+// (auth shows header names and the authorization scheme only, never a value).
 
 import { createServer } from "node:http";
 import { sseFor } from "../src/test-fixtures.ts";
@@ -53,12 +57,18 @@ const port = Number(positional[0] ?? 0);
 const BASIC = `Basic ${Buffer.from(`gateway:${PASSWORD}`, "utf8").toString("base64")}`;
 const OPEN_WEIGHT = "oss/zai-org/glm-5-3";
 
+/** The OpenAI-format list (`GET /v1/models` without `anthropic-version`). */
 const LISTED = {
   object: "list",
-  data: [
-    { id: "claude-sonnet-5", object: "model", created: 0, owned_by: "vertex" },
-    { id: "gemini-3.5-flash", object: "model", created: 0, owned_by: "vertex" },
-  ],
+  data: [{ id: "gemini-3.5-flash", object: "model", created: 0, owned_by: "vertex" }],
+};
+
+/** The Anthropic-format list (`GET /v1/models` with `anthropic-version`), Anthropic's list shape. */
+const ANTHROPIC_LISTED = {
+  data: [{ type: "model", id: "claude-sonnet-5", display_name: "Claude Sonnet 5", created_at: "2026-01-01T00:00:00Z" }],
+  has_more: false,
+  first_id: "claude-sonnet-5",
+  last_id: "claude-sonnet-5",
 };
 
 const AGW_MODELS = ["claude-sonnet-5", "gpt-6-luna", "gemini-3.5-flash", OPEN_WEIGHT, "openai/*"];
@@ -157,13 +167,17 @@ const server = createServer(async (request, response) => {
       model = "";
     }
   }
-  console.log(`${request.method} ${pathname} auth=${authSummary(request.headers)}${model ? ` model=${model}` : ""}`);
+  const version = request.headers["anthropic-version"] !== undefined ? " anthropic-version" : "";
+  console.log(`${request.method} ${pathname} auth=${authSummary(request.headers)}${version}${model ? ` model=${model}` : ""}`);
 
   if (MODE === "agentgateway") return agentgateway(request, response, pathname, model);
 
   if (request.method === "GET" && pathname === "/v1/models") {
-    if (!authorized(request.headers, "bearer")) return send(response, 401, { error: { message: `${describeAuth("bearer")} required` } });
-    return send(response, 200, LISTED);
+    // The Anthropic-format list takes the same auth as /v1/messages.
+    const anthropic = request.headers["anthropic-version"] !== undefined;
+    const kind = anthropic ? ROUTES["/v1/messages"].auth : "bearer";
+    if (!authorized(request.headers, kind)) return send(response, 401, { error: { message: `${describeAuth(kind)} required` } });
+    return send(response, 200, anthropic ? ANTHROPIC_LISTED : LISTED);
   }
 
   const route = request.method === "POST" ? ROUTES[pathname] : undefined;

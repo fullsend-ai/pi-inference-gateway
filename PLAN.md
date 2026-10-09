@@ -211,8 +211,11 @@ target gateway. Facts from its docs that shaped the design:
 - Client auth is per deployment. The documented setups use `Authorization: Basic
   base64(<user>:<password>)` (default user `gateway`); Praxis injects the backend token itself.
   The deployment probed earlier wants `x-api-key` on `/v1/messages` and Bearer elsewhere.
-- `GET /v1/models` is passed through to one backend without merging: the list is partial by design,
-  so config-added models are a core feature, not a workaround.
+- `GET /v1/models` is answered from the deployment's `model_catalog` filters, one per API dialect
+  (an OpenAI-format list for a Bearer request, an Anthropic-format list for a Messages-auth request
+  with `anthropic-version`). A list that leaves out working models is a deployment configuration
+  gap, not Praxis's design. Discovery queries both formats (issue #12), and config-added models
+  cover incomplete catalogs.
 - Its documented clients are each pinned to one API (Codex → Responses, Claude Code → Messages,
   OpenCode → Chat Completions); there is no pi integration. Its OpenCode plugin attaches credentials
   only when the configured base URL equals `PRAXIS_BASE_URL`.
@@ -233,8 +236,8 @@ What changed:
    never registered. Only the user-level config file is read, never a project `.pi/`.
 3. **Mock**: `--auth basic` requires `Basic gateway:test-pass` on every path and on `/v1/models`;
    the default `--auth live` keeps the per-path x-api-key/Bearer behaviour.
-4. **README**: a Praxis walkthrough (both auth setups, why `/v1/models` is partial and how to add
-   models, `INFERENCE_GATEWAY_PROVIDER_ID=praxis`, known limits) and a Security section. The package
+4. **README**: a Praxis walkthrough (both auth setups, how `/v1/models` is answered per dialect and
+   how to add models a catalog leaves out, `INFERENCE_GATEWAY_PROVIDER_ID=praxis`, known limits) and a Security section. The package
    name and default provider id stay generic.
 
 ## agentgateway support (2026-10-09)

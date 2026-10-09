@@ -1,7 +1,7 @@
-// Model discovery: fetch the gateway's model list, parse every shape gateways actually return,
-// sanitise it, pick a pi transport per model, and fill metadata from (in order) the config, the
-// gateway's own fields, pi's built-in catalog and safe defaults. Pure exports throughout; the only
-// I/O is the injected `fetch`.
+// Model discovery: fetch the gateway's model lists (OpenAI and Anthropic format), parse every shape
+// gateways actually return, sanitise and merge them by id, pick a pi transport per model, and fill
+// metadata from (in order) the config, the gateway's own fields, pi's built-in catalog and safe
+// defaults. Pure exports throughout; the only I/O is the injected `fetch`.
 
 import { hasApi } from "@earendil-works/pi-ai";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -17,7 +17,7 @@ import type {
   OpenAIResponsesCompat,
   ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import { authHeaderEntry, authHeaderFor, credentialHeaderNames, ENV, type CompatOverride, type GatewayCredentials, type ModelOverride, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
+import { authHeaderEntry, authHeaderFor, credentialHeaderNames, DISCOVERY_DIALECT_TARGETS, discoveryDialects, ENV, type AuthTarget, type CompatOverride, type DiscoveryDialect, type GatewayCredentials, type ModelOverride, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
 
 export const LIMITS = {
   maxIdLength: 256,
@@ -216,6 +216,16 @@ async function plainTextDetail(response: Response, secrets: readonly string[]): 
   return flat.length > ERROR_DETAIL_CHARS ? `${flat.slice(0, ERROR_DETAIL_CHARS)}…` : flat;
 }
 
+/** A model-list request the gateway answered with a non-2xx status. */
+export class ModelListHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ModelListHttpError";
+    this.status = status;
+  }
+}
 
 /**
  * GET the model list. Redirects are an error (a gateway that redirects its model list is
@@ -263,7 +273,7 @@ async function fetchModelListWithin(
     // answer auth and conversion failures that way), with every credential the request carried
     // redacted.
     const detail = await plainTextDetail(response, options.secrets ?? componentsOfHeaders(options.headers));
-    throw new Error(`model list request returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+    throw new ModelListHttpError(response.status, `model list request returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
   }
   let text: string;
   try {
@@ -456,6 +466,38 @@ export function parseModelList(body: unknown): ParsedModelList {
     entries.push(entry);
   }
   return { entries, dropped, wildcards, wildcardCount, nonChat };
+}
+
+/**
+ * Merge the OpenAI-format and Anthropic-format lists by id. The OpenAI list's entries come first and
+ * keep today's selection rules, also for an id both lists carry. An id only the Anthropic list
+ * carries defaults to `anthropic-messages` (that list names what `/v1/messages` routes), unless the
+ * gateway gave it an explicit `api`; a config `models[id].api` still wins over both. Models and
+ * distinct wildcard ids together stay capped at `LIMITS.maxModels`.
+ */
+export function mergeModelLists(openai: ParsedModelList | undefined, anthropic: ParsedModelList | undefined): ParsedModelList {
+  const empty: ParsedModelList = { entries: [], dropped: 0, wildcards: [], wildcardCount: 0, nonChat: 0 };
+  const first = openai ?? empty;
+  const second = anthropic ?? empty;
+  const entries = [...first.entries];
+  const seen = new Set(entries.map((entry) => entry.id));
+  const wildcards = [...first.wildcards];
+  const repeatedWildcards = second.wildcards.filter((id) => first.wildcards.includes(id)).length;
+  for (const id of second.wildcards) {
+    if (!wildcards.includes(id) && wildcards.length < MAX_WILDCARD_SAMPLES) wildcards.push(id);
+  }
+  const wildcardCount = first.wildcardCount + second.wildcardCount - repeatedWildcards;
+  let dropped = first.dropped + second.dropped;
+  for (const entry of second.entries) {
+    if (seen.has(entry.id)) continue;
+    if (entries.length + wildcardCount >= LIMITS.maxModels) {
+      dropped++;
+      continue;
+    }
+    seen.add(entry.id);
+    entries.push({ ...entry, api: entry.api ?? "anthropic-messages" });
+  }
+  return { entries, dropped, wildcards, wildcardCount, nonChat: first.nonChat + second.nonChat };
 }
 
 /** The one warning for wildcard ids, or none. */
@@ -821,7 +863,7 @@ export function buildModel(entry: GatewayModelEntry, config: GatewayConfig): Gat
 
 /**
  * Config `models` entries with an `api` that the list does not contain: models a gateway serves but
- * does not list (a path-routing proxy lists only what one backend reports). Added regardless of
+ * does not list (a gateway's configured catalog can leave out models it routes). Added regardless of
  * include/exclude, since they were named explicitly; metadata comes from the override, then pi's
  * catalog, then defaults.
  */
@@ -884,17 +926,52 @@ export function modelsFromList(body: unknown, config: GatewayConfig): ModelsFrom
   return buildFromParsed(parseModelList(body), config);
 }
 
-/** The request headers for discovery: static config headers plus the token in the configured header. */
+/** `anthropic-version` on the Anthropic-format list request: the version Anthropic's API and SDKs send. */
+export const ANTHROPIC_VERSION = "2023-06-01";
+
+/**
+ * A list request's headers: `extra`, then static config headers (never one named like an auth
+ * header), then the one auth header of `target`'s scheme. Never two credentials.
+ */
+function listHeaders(
+  config: Pick<GatewayConfig, "headers" | "authHeaders">,
+  credentials: GatewayCredentials | string | undefined,
+  target: AuthTarget,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  const resolved = typeof credentials === "string" ? { token: credentials, problems: [] } : (credentials ?? { problems: [] });
+  const entry = authHeaderEntry(authHeaderFor(config, target), resolved);
+  const reserved = credentialHeaderNames(config.authHeaders);
+  const statics = Object.entries(config.headers).filter(([name]) => !reserved.has(name.toLowerCase()));
+  // A static header replaces an `extra` one of the same name, whatever its case.
+  const overridden = new Set(statics.map(([name]) => name.toLowerCase()));
+  const defaults = Object.entries(extra).filter(([name]) => !overridden.has(name.toLowerCase()));
+  return Object.fromEntries([...defaults, ...statics, ...(entry ? [entry] : [])]);
+}
+
 /** The request headers for discovery: static config headers plus the `discovery` auth scheme's header. */
 export function discoveryHeaders(
   config: Pick<GatewayConfig, "headers" | "authHeaders">,
   credentials: GatewayCredentials | string | undefined,
 ): Record<string, string> {
-  const resolved = typeof credentials === "string" ? { token: credentials, problems: [] } : (credentials ?? { problems: [] });
-  const entry = authHeaderEntry(authHeaderFor(config, "discovery"), resolved);
-  const reserved = credentialHeaderNames(config.authHeaders);
-  const statics = Object.entries(config.headers).filter(([name]) => !reserved.has(name.toLowerCase()));
-  return Object.fromEntries([...statics, ...(entry ? [entry] : [])]);
+  return listHeaders(config, credentials, "discovery");
+}
+
+/**
+ * The request headers for the Anthropic-format list: `anthropic-version`, static config headers, and
+ * the header the `anthropic-messages` scheme puts on a Messages request (`x-api-key` by default) —
+ * so a gateway configured for Bearer or Basic on Messages gets the same here.
+ */
+export function anthropicListHeaders(
+  config: Pick<GatewayConfig, "headers" | "authHeaders">,
+  credentials: GatewayCredentials | string | undefined,
+): Record<string, string> {
+  return listHeaders(config, credentials, "anthropic-messages", { "anthropic-version": ANTHROPIC_VERSION });
+}
+
+/** The auth targets whose credentials discovery needs, one per queried dialect. */
+export function discoveryTargets(config: Pick<GatewayConfig, "discovery">): AuthTarget[] {
+  return discoveryDialects(config).map((dialect) => DISCOVERY_DIALECT_TARGETS[dialect]);
 }
 
 export function modelsUrl(config: Pick<GatewayConfig, "baseUrl" | "modelsPath">): string {
@@ -915,25 +992,76 @@ export interface DiscoverOptions {
 }
 
 /**
- * Fetch and build the gateway's models. Rejects on any network, HTTP, size or shape failure, and on
- * a list with no usable model (see assertUsable): an empty catalog is never published.
+ * Statuses on the Anthropic-format list request that mean the gateway has no such catalog (or does
+ * not take that request): expected on a single-catalog gateway, so not worth a warning.
+ */
+const NO_CATALOG_STATUSES: ReadonlySet<number> = new Set([400, 401, 403, 404, 405]);
+
+type ListOutcome = { list: ParsedModelList } | { error: unknown } | undefined;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Fetch and build the gateway's models. Each configured dialect (see DiscoveryDialect; both by
+ * default) is one request to the same URL, sent in parallel, and the lists are merged by id
+ * (mergeModelLists). One list failing is not fatal while the other has a usable model: an OpenAI-list
+ * failure is warned about, an Anthropic-list failure too unless its status says "no such catalog".
+ * Rejects when no list could be fetched (with the OpenAI list's error first), and on a merged list
+ * with no usable model (see assertUsable): an empty catalog is never published.
  */
 export async function discoverModels(config: GatewayConfig, options: DiscoverOptions): Promise<GatewayModel[]> {
   const credentials: GatewayCredentials = options.credentials ?? { ...(options.token ? { token: options.token } : {}), problems: [] };
-  const sent = authHeaderEntry(authHeaderFor(config, "discovery"), credentials);
-  const body = await fetchModelList({
-    url: modelsUrl(config),
-    headers: discoveryHeaders(config, credentials),
-    secrets: credentialComponents(credentials, sent?.[1]),
-    ...(options.fetch ? { fetch: options.fetch } : {}),
-    ...(options.signal ? { signal: options.signal } : {}),
-    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-  });
-  const parsed = parseModelList(body);
+  const dialects = discoveryDialects(config);
+  const fetchList = async (dialect: DiscoveryDialect): Promise<ParsedModelList> => {
+    const sent = authHeaderEntry(authHeaderFor(config, DISCOVERY_DIALECT_TARGETS[dialect]), credentials);
+    const body = await fetchModelList({
+      url: modelsUrl(config),
+      headers: dialect === "openai" ? discoveryHeaders(config, credentials) : anthropicListHeaders(config, credentials),
+      secrets: credentialComponents(credentials, sent?.[1]),
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    });
+    const parsed = parseModelList(body);
+    if (dialect === "anthropic" && isRecord(body) && body.has_more === true) {
+      options.warn?.(
+        `the Anthropic-format model list has more pages (has_more); only its first page is listed. ` +
+          `Add missing models via "models" in the config file (or ${ENV.extraModels})`,
+      );
+    }
+    return parsed;
+  };
+  const settle = (dialect: DiscoveryDialect): Promise<ListOutcome> =>
+    dialects.includes(dialect)
+      ? fetchList(dialect).then(
+          (list) => ({ list }),
+          (error: unknown) => ({ error }),
+        )
+      : Promise.resolve(undefined);
+  const [openai, anthropic] = await Promise.all([settle("openai"), settle("anthropic")]);
+  const openaiList = openai && "list" in openai ? openai.list : undefined;
+  const anthropicList = anthropic && "list" in anthropic ? anthropic.list : undefined;
+
+  if (openai && "error" in openai) {
+    if (!anthropicList || anthropicList.entries.length === 0) throw openai.error;
+    options.warn?.(`the OpenAI-format model list failed (${errorMessage(openai.error)}); listing the Anthropic-format list's models only`);
+  }
+  if (anthropic && "error" in anthropic) {
+    if (!openaiList) throw anthropic.error;
+    const noCatalog = anthropic.error instanceof ModelListHttpError && NO_CATALOG_STATUSES.has(anthropic.error.status);
+    if (!noCatalog) {
+      options.warn?.(`the Anthropic-format model list failed (${errorMessage(anthropic.error)}); listing the OpenAI-format list's models only`);
+    }
+  }
+
+  const parsed = mergeModelLists(openaiList, anthropicList);
   const built = buildFromParsed(parsed, config);
   for (const entry of parsed.entries) options.hints?.set(entry.id, routingHints(entry));
   for (const warning of built.warnings) options.warn?.(warning);
-  assertUsable(parsed);
+  // Nothing usable in either list: report the primary list's contents, as a single list would.
+  if (parsed.entries.length === 0) assertUsable(openaiList ?? anthropicList ?? parsed);
   return built.models;
 }
 

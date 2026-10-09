@@ -16,6 +16,7 @@ every variable, the config file, auth and model-list behaviour. Back to the [REA
 | `INFERENCE_GATEWAY_BASIC_USER` | Basic-auth username — see [Auth](#auth). | `gateway` |
 | `INFERENCE_GATEWAY_BASIC_PASSWORD` / `_PASSWORD_FILE` | Basic-auth password, or a file holding it (re-read per request). | — |
 | `INFERENCE_GATEWAY_EXTRA_MODELS` | Models the gateway serves but does not list: `id=api,id=api`. | — |
+| `INFERENCE_GATEWAY_DISCOVERY` | Model-list formats to request, comma-separated: `openai`, `anthropic` (see [Discovery: both list formats](#discovery-both-list-formats)). | `openai,anthropic` |
 | `INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS` | How long pi's startup waits for the model list; `0` skips it (see [When the model list changes](#when-the-model-list-changes)). | `5000` |
 | `INFERENCE_GATEWAY_SESSION_AFFINITY` | `1` sends a hashed session id for gateway affinity and caching (see [Session affinity](#session-affinity)). | off |
 
@@ -56,6 +57,7 @@ For several gateways, per-model overrides or models the gateway does not list, a
 | `defaultApi` | As `INFERENCE_GATEWAY_DEFAULT_API`; see [Which API to pick](routing.md#which-api-to-pick). |
 | `headers` | Extra headers on every request, discovery included. A header named like an auth header (`authorization`, `x-api-key`, or any header used in `authHeader`) is refused: credentials only come from the configured key, token or password. |
 | `modelsPath` | Model-list path, default `/v1/models`. |
+| `discovery` | Model-list formats to request: `["openai", "anthropic"]` (the default), `["openai"]` or `["anthropic"]`. See [Discovery: both list formats](#discovery-both-list-formats). |
 | `include` / `exclude` | `*` globs over listed model ids. |
 | `models` | Per-id overrides: `api`, `name`, `contextWindow`, `maxTokens`, `reasoning`, `input` (`["text","image"]`), `cost` (USD per million tokens), `compat` (see [Request features (`compat`)](compat.md#request-features-compat)), `thinkingLevelMap` (what each thinking level is sent as, see [Thinking levels](compat.md#thinking-levels-thinkinglevelmap)). **An entry with an `api` whose id the gateway does not list adds that model.** |
 | `fallbackModels` | Offered when discovery fails: ids or `{ "id": ..., "owned_by": ... }` objects. |
@@ -119,7 +121,11 @@ By default each transport uses its protocol's native scheme:
 | `anthropic-messages` | `POST /v1/messages` | `x-api-key` |
 | `openai-responses` | `POST /v1/responses` | `bearer` |
 | `openai-completions` | `POST /v1/chat/completions` | `bearer` |
-| `discovery` | `GET /v1/models` | `bearer` |
+| `discovery` | `GET /v1/models` (OpenAI-format list) | `bearer` |
+
+The Anthropic-format model list (`GET /v1/models` with `anthropic-version`) uses the
+`anthropic-messages` scheme, because a gateway that wants Bearer or Basic on Messages wants the same
+there.
 
 Override one target, or all of them with a single value:
 
@@ -137,6 +143,31 @@ Basic auth reads its username from `INFERENCE_GATEWAY_BASIC_USER` (config: `user
 `INFERENCE_GATEWAY_BASIC_PASSWORD_FILE` (config: `passwordEnv` / `passwordFile`, re-read per request). A
 username containing `:` is refused. The key pi itself passes around is never sent: the header always
 comes from the configured credentials.
+
+## Discovery: both list formats
+
+Some gateways keep a separate model catalog for each API dialect on the same path, as Anthropic's own
+API does for its list. So discovery sends two `GET {baseUrl}{modelsPath}` requests in parallel:
+
+| List | Request | Lists the models for |
+|---|---|---|
+| OpenAI format (`{object: "list", data}`) | the `discovery` auth scheme (Bearer by default) | `/v1/responses`, `/v1/chat/completions` |
+| Anthropic format (`{data, has_more, first_id, last_id}`) | the `anthropic-messages` auth scheme (`x-api-key` by default) plus `anthropic-version: 2023-06-01` | `/v1/messages` |
+
+Each request carries exactly one credential. The lists are merged by id:
+
+- An id on the OpenAI-format list keeps the usual [API selection](routing.md#which-api-to-pick), even
+  when the Anthropic-format list has it too.
+- An id only on the Anthropic-format list goes to `anthropic-messages`. A `models[id].api` still wins.
+- If the Anthropic-format list has more pages (`has_more`), only the first page is used, with one
+  warning.
+
+One request failing is not fatal while the other returns a usable model. A 400, 401, 403, 404 or 405
+on the Anthropic-format request means the gateway has no such catalog, so there is no warning. Any
+other failure of either request gets one warning. When both fail, discovery fails with the
+OpenAI-format request's error. If a gateway rejects one of the two requests in a way that matters,
+turn it off with `"discovery": ["openai"]` (or `["anthropic"]`), or
+`INFERENCE_GATEWAY_DISCOVERY=openai`.
 
 ## Models the gateway does not list
 

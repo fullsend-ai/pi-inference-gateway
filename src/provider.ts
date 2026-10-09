@@ -31,7 +31,7 @@ import {
   type GatewayCredentials,
   type LoadConfigDeps,
 } from "./config.ts";
-import { discoverModels, fallbackModels, rebindModels, ROUTING_HINTS_KEY, type GatewayModel, type RoutingHints } from "./discovery.ts";
+import { discoverModels, discoveryTargets, fallbackModels, rebindModels, ROUTING_HINTS_KEY, type GatewayModel, type RoutingHints } from "./discovery.ts";
 
 export const LOG_PREFIX = "[pi-inference-gateway]";
 
@@ -273,9 +273,29 @@ export function onceWarn(warn: (message: string) => void = console.warn): (messa
   };
 }
 
-/** The credential discovery's own scheme needs (and only that). */
-function discoveryCredentials(config: GatewayConfig, deps: RuntimeDeps): Promise<GatewayCredentials> {
-  return resolveCredentials(config, deps.env ?? process.env, deps.readText, credentialKind(authHeaderFor(config, "discovery")));
+/**
+ * The credentials discovery's list requests need (and only those): the `discovery` scheme's for the
+ * OpenAI-format list, the `anthropic-messages` scheme's for the Anthropic-format one. When the two
+ * need different kinds, each is resolved on its own, so an unreadable token or password file breaks
+ * only the list that needs it; it rejects only when none could be read.
+ */
+async function discoveryCredentials(config: GatewayConfig, deps: RuntimeDeps): Promise<GatewayCredentials> {
+  const env = deps.env ?? process.env;
+  const kinds = [...new Set(discoveryTargets(config).map((target) => credentialKind(authHeaderFor(config, target))))];
+  if (kinds.length === 1) return resolveCredentials(config, env, deps.readText, kinds[0]);
+  const settled = await Promise.allSettled(kinds.map((kind) => resolveCredentials(config, env, deps.readText, kind)));
+  const resolved = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+  if (resolved.length === 0) {
+    const [first] = settled;
+    throw first?.status === "rejected" ? first.reason : new Error("no credential could be read");
+  }
+  const merged: GatewayCredentials = { problems: [] };
+  for (const credentials of resolved) {
+    if (credentials.token) merged.token = credentials.token;
+    if (credentials.basic) merged.basic = credentials.basic;
+    merged.problems.push(...credentials.problems);
+  }
+  return merged;
 }
 
 /**
