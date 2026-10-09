@@ -40,6 +40,7 @@ the suite runs with no network and no credentials.
 ```
 extension factory (awaited by pi before startup)
   loadConfig()            env INFERENCE_GATEWAY_* + ~/.pi/agent/inference-gateway.json
+    mergeConfigOverlay()  inference-gateway.local.json over it, per provider and per model
     bindEnvCredentials()  drop providers using INFERENCE_GATEWAY_* credentials for another URL
     dropCredentialHeaders() drop static headers named like an auth header
   initialModels()         GET {baseUrl}/v1/models, 5 s, redirect: "error", 1 MiB cap

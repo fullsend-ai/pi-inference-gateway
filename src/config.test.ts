@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   CONFIG_FILE_NAME,
+  LOCAL_CONFIG_FILE_NAME,
   agentDir,
   authHeaderEntry,
   authHeaderFor,
@@ -581,7 +582,7 @@ describe("loadConfig", () => {
         return JSON.stringify({ providers: { gw: { baseUrl: "https://gw.example.com" } } });
       },
     });
-    assert.deepEqual(seen, [`/tmp/agent/${CONFIG_FILE_NAME}`]);
+    assert.deepEqual(seen, [`/tmp/agent/${CONFIG_FILE_NAME}`, `/tmp/agent/${LOCAL_CONFIG_FILE_NAME}`]);
     assert.equal(result.providers[0].id, "gw");
   });
 
@@ -605,6 +606,197 @@ describe("loadConfig", () => {
     });
     assert.equal(result.providers.length, 0);
     assert.match(result.warnings[0], /EACCES/);
+  });
+});
+
+describe("baseUrlEnv", () => {
+  const entry = (fields: Record<string, unknown>) => ({ providers: { corp: { apiKeyEnv: "CORP_KEY", ...fields } } });
+
+  it("reads the base URL from the named variable, normalised like a literal baseUrl", () => {
+    const { providers, warnings } = parseConfigFile(entry({ baseUrlEnv: "CORP_URL" }), HOME, { CORP_URL: " https://gw.example.com/v1/ " });
+    assert.deepEqual(warnings, []);
+    assert.equal(providers[0].baseUrl, "https://gw.example.com");
+    assert.equal(providers[0].apiKeyEnv, "CORP_KEY");
+  });
+
+  it("skips the provider with one warning naming the variable when it is unset or empty", () => {
+    for (const env of [{}, { CORP_URL: "" }, { CORP_URL: "   " }]) {
+      const { providers, warnings } = parseConfigFile(entry({ baseUrlEnv: "CORP_URL" }), HOME, env);
+      assert.deepEqual(providers, []);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /providers\.corp: "baseUrlEnv" names CORP_URL, which is unset or empty; skipped/);
+    }
+  });
+
+  it("requires exactly one of baseUrl and baseUrlEnv", () => {
+    const both = parseConfigFile(entry({ baseUrl: "https://gw.example.com", baseUrlEnv: "CORP_URL" }), HOME, { CORP_URL: "https://gw.example.com" });
+    assert.deepEqual(both.providers, []);
+    assert.match(both.warnings[0], /either "baseUrl" or "baseUrlEnv", not both; skipped/);
+    const neither = parseConfigFile(entry({}), HOME, {});
+    assert.deepEqual(neither.providers, []);
+    assert.match(neither.warnings[0], /"baseUrl" or "baseUrlEnv" is required; skipped/);
+  });
+
+  it("rejects a value that is not a variable name", () => {
+    for (const baseUrlEnv of ["https://gw.example.com", "1URL", "", 5]) {
+      const { providers, warnings } = parseConfigFile(entry({ baseUrlEnv }), HOME, {});
+      assert.deepEqual(providers, [], String(baseUrlEnv));
+      assert.match(warnings[0], /"baseUrlEnv" must be an environment variable name; skipped/);
+    }
+  });
+
+  it("validates the value like a literal baseUrl and never prints it", () => {
+    for (const value of ["sk-not-a-url", "ftp://gw.example.com", "https://u:p@gw.example.com", "https://gw.example.com/?a=b"]) {
+      const { providers, warnings } = parseConfigFile(entry({ baseUrlEnv: "CORP_URL" }), HOME, { CORP_URL: value });
+      assert.deepEqual(providers, [], value);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /"baseUrlEnv" names CORP_URL, which does not hold an http\(s\) base URL/);
+      assert.equal(warnings[0].includes(value), false, value);
+      assert.equal(warnings[0].includes("sk-"), false, value);
+    }
+  });
+
+  it("does not let INFERENCE_GATEWAY_* credentials follow a baseUrlEnv URL elsewhere", async () => {
+    const readText = async () =>
+      JSON.stringify({ providers: { other: { baseUrlEnv: "OTHER_URL", apiKeyEnv: "INFERENCE_GATEWAY_API_KEY" } } });
+    const refused = await loadConfig({
+      env: { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com", INFERENCE_GATEWAY_API_KEY: "k", OTHER_URL: "https://elsewhere.example.com" },
+      home: HOME,
+      readText,
+    });
+    assert.deepEqual(
+      refused.providers.map((provider) => provider.id),
+      ["gateway"],
+    );
+    assert.match(refused.warnings.join("\n"), /other: refused .*INFERENCE_GATEWAY_API_KEY.*https:\/\/elsewhere\.example\.com/);
+    const allowed = await loadConfig({
+      env: { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com", INFERENCE_GATEWAY_API_KEY: "k", OTHER_URL: "https://gw.example.com/v1" },
+      home: HOME,
+      readText,
+    });
+    assert.deepEqual(allowed.warnings, []);
+    assert.ok(allowed.providers.some((provider) => provider.id === "other"));
+  });
+
+  it("lets a file entry for the env provider point at INFERENCE_GATEWAY_BASE_URL without a warning", async () => {
+    const { providers, warnings } = await loadConfig({
+      env: { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com" },
+      home: HOME,
+      readText: async () => JSON.stringify({ providers: { gateway: { baseUrlEnv: "INFERENCE_GATEWAY_BASE_URL", include: ["claude-*"] } } }),
+    });
+    assert.deepEqual(warnings, []);
+    assert.equal(providers[0].baseUrl, "https://gw.example.com");
+    assert.deepEqual(providers[0].include, ["claude-*"]);
+  });
+});
+
+describe("local overlay file", () => {
+  const SHARED = `${HOME}/.pi/agent/${CONFIG_FILE_NAME}`;
+  const LOCAL = `${HOME}/.pi/agent/${LOCAL_CONFIG_FILE_NAME}`;
+  const files =
+    (contents: Record<string, string>) =>
+    async (path: string): Promise<string | undefined> =>
+      Object.hasOwn(contents, path) ? contents[path] : undefined;
+  const shared = JSON.stringify({
+    providers: {
+      corp: {
+        baseUrlEnv: "CORP_URL",
+        apiKeyEnv: "CORP_KEY",
+        headers: { "x-team": "platform" },
+        models: {
+          "claude-sonnet-5": { contextWindow: 1000000, compat: { supportsMidConvoEffort: false } },
+          "gpt-6-luna": { api: "openai-responses" },
+        },
+      },
+    },
+  });
+  const env = { CORP_URL: "https://gw.example.com" };
+
+  it("merges the overlay per provider and per model", async () => {
+    const local = JSON.stringify({
+      providers: {
+        corp: {
+          headers: { "x-site": "lab" },
+          models: {
+            "claude-sonnet-5": { contextWindow: 200000, maxTokens: 32000, compat: { supportsStrictTools: false } },
+            "vendor/org/open-model": { api: "openai-completions", contextWindow: 262144, maxTokens: 65536 },
+          },
+        },
+      },
+    });
+    const { providers, warnings } = await loadConfig({ env, home: HOME, readText: files({ [SHARED]: shared, [LOCAL]: local }) });
+    assert.deepEqual(warnings, []);
+    assert.equal(providers.length, 1);
+    const [corp] = providers;
+    assert.equal(corp.baseUrl, "https://gw.example.com");
+    assert.equal(corp.apiKeyEnv, "CORP_KEY");
+    assert.deepEqual(corp.headers, { "x-team": "platform", "x-site": "lab" });
+    assert.deepEqual(corp.models["claude-sonnet-5"], {
+      contextWindow: 200000,
+      maxTokens: 32000,
+      compat: { supportsMidConvoEffort: false, supportsStrictTools: false },
+    });
+    assert.deepEqual(corp.models["gpt-6-luna"], { api: "openai-responses" });
+    assert.deepEqual(corp.models["vendor/org/open-model"], { api: "openai-completions", contextWindow: 262144, maxTokens: 65536 });
+  });
+
+  it("lets the overlay replace baseUrlEnv with a literal baseUrl, add providers, and drop compat with null", async () => {
+    const local = JSON.stringify({
+      providers: {
+        corp: { baseUrl: "http://127.0.0.1:4000", models: { "claude-sonnet-5": { compat: null } } },
+        lab: { baseUrl: "http://127.0.0.1:4001" },
+      },
+    });
+    const { providers, warnings } = await loadConfig({ env: {}, home: HOME, readText: files({ [SHARED]: shared, [LOCAL]: local }) });
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(
+      providers.map((provider) => [provider.id, provider.baseUrl]),
+      [
+        ["corp", "http://127.0.0.1:4000"],
+        ["lab", "http://127.0.0.1:4001"],
+      ],
+    );
+    assert.equal(providers[0].models["claude-sonnet-5"].compat, null);
+    assert.equal(providers[0].models["claude-sonnet-5"].contextWindow, 1000000);
+  });
+
+  it("is silent when the overlay is missing, and works without the shared file", async () => {
+    const missing = await loadConfig({ env, home: HOME, readText: files({ [SHARED]: shared }) });
+    assert.deepEqual(missing.warnings, []);
+    assert.equal(missing.providers[0].id, "corp");
+    const onlyLocal = await loadConfig({ env: {}, home: HOME, readText: files({ [LOCAL]: JSON.stringify({ providers: { lab: { baseUrl: "http://127.0.0.1:4001" } } }) }) });
+    assert.deepEqual(onlyLocal.warnings, []);
+    assert.equal(onlyLocal.providers[0].id, "lab");
+  });
+
+  it("warns naming the overlay when it is malformed, and keeps the shared file", async () => {
+    for (const local of ["{ not json", "[]", JSON.stringify({ corp: {} })]) {
+      const { providers, warnings } = await loadConfig({ env, home: HOME, readText: files({ [SHARED]: shared, [LOCAL]: local }) });
+      assert.equal(warnings.length, 1, local);
+      assert.ok(warnings[0].startsWith(`${LOCAL}: `), warnings[0]);
+      assert.equal(providers[0].id, "corp");
+      assert.equal(providers[0].models["claude-sonnet-5"].contextWindow, 1000000);
+    }
+  });
+
+  it("names both files in a warning about a merged entry", async () => {
+    const local = JSON.stringify({ providers: { corp: { defaultApi: "nope" } } });
+    const { warnings } = await loadConfig({ env, home: HOME, readText: files({ [SHARED]: shared, [LOCAL]: local }) });
+    assert.equal(warnings.length, 1);
+    assert.ok(warnings[0].startsWith(`${SHARED} + ${LOCAL}: providers.corp: "defaultApi"`), warnings[0]);
+  });
+
+  it("reads the overlay from PI_CODING_AGENT_DIR and keeps __proto__ an ordinary key", async () => {
+    const local = '{"providers":{"corp":{"models":{"__proto__":{"api":"openai-completions"}}}}}';
+    const { providers } = await loadConfig({
+      env: { ...env, PI_CODING_AGENT_DIR: "/tmp/agent" },
+      home: HOME,
+      readText: files({ [`/tmp/agent/${CONFIG_FILE_NAME}`]: shared, [`/tmp/agent/${LOCAL_CONFIG_FILE_NAME}`]: local }),
+    });
+    const { models } = providers[0];
+    assert.equal(Object.getPrototypeOf(models), Object.prototype);
+    assert.ok(Object.hasOwn(models, "__proto__"));
+    assert.deepEqual(Object.keys(models).sort(), ["__proto__", "claude-sonnet-5", "gpt-6-luna"]);
   });
 });
 
