@@ -492,29 +492,38 @@ export function mergeModelLists(openai: ParsedModelList | undefined, anthropic: 
   const second = anthropic ?? empty;
   const entries = [...first.entries];
   const seen = new Set(entries.map((entry) => entry.id));
-  const wildcards = [...first.wildcards];
-  // Deduplicate against every wildcard id, not just the warning samples.
-  const repeatedWildcards = [...second.wildcardIds].filter((id) => first.wildcardIds.has(id)).length;
-  for (const id of second.wildcards) {
-    if (!wildcards.includes(id) && wildcards.length < MAX_WILDCARD_SAMPLES) wildcards.push(id);
-  }
-  const wildcardCount = first.wildcardCount + second.wildcardCount - repeatedWildcards;
+  // Models and wildcard ids share one budget. The second list's models claim what the first list
+  // left before its new wildcard ids do: a wildcard only feeds a warning.
+  const wildcardIds = new Set(first.wildcardIds);
+  let used = entries.length + wildcardIds.size;
   let dropped = first.dropped + second.dropped;
   for (const entry of second.entries) {
     if (seen.has(entry.id)) continue;
-    if (entries.length + wildcardCount >= LIMITS.maxModels) {
+    if (used >= LIMITS.maxModels) {
       dropped++;
       continue;
     }
     seen.add(entry.id);
+    used++;
     entries.push({ ...entry, api: entry.api ?? "anthropic-messages" });
+  }
+  // Deduplicate against every wildcard id, not just the warning samples.
+  for (const id of second.wildcardIds) {
+    if (wildcardIds.has(id)) continue;
+    if (used >= LIMITS.maxModels) {
+      dropped++;
+      continue;
+    }
+    wildcardIds.add(id);
+    used++;
   }
   return {
     entries,
     dropped,
-    wildcards,
-    wildcardCount,
-    wildcardIds: new Set([...first.wildcardIds, ...second.wildcardIds]),
+    // Insertion order keeps the first list's samples first; only retained ids are sampled.
+    wildcards: [...wildcardIds].slice(0, MAX_WILDCARD_SAMPLES),
+    wildcardCount: wildcardIds.size,
+    wildcardIds,
     nonChat: first.nonChat + second.nonChat,
   };
 }
@@ -950,30 +959,38 @@ export const ANTHROPIC_VERSION = "2023-06-01";
 
 /**
  * A list request's headers: `extra`, then static config headers (never one named like an auth
- * header), then the one auth header of `target`'s scheme. Never two credentials.
+ * header, nor one in `omit`, compared case-insensitively), then the one auth header of `target`'s
+ * scheme. Never two credentials.
  */
 function listHeaders(
   config: Pick<GatewayConfig, "headers" | "authHeaders">,
   credentials: GatewayCredentials | string | undefined,
   target: AuthTarget,
   extra: Record<string, string> = {},
+  omit: readonly string[] = [],
 ): Record<string, string> {
   const resolved = typeof credentials === "string" ? { token: credentials, problems: [] } : (credentials ?? { problems: [] });
   const entry = authHeaderEntry(authHeaderFor(config, target), resolved);
   const reserved = credentialHeaderNames(config.authHeaders);
-  const statics = Object.entries(config.headers).filter(([name]) => !reserved.has(name.toLowerCase()));
+  const omitted = new Set(omit.map((name) => name.toLowerCase()));
+  const statics = Object.entries(config.headers).filter(([name]) => !reserved.has(name.toLowerCase()) && !omitted.has(name.toLowerCase()));
   // A static header replaces an `extra` one of the same name, whatever its case.
   const overridden = new Set(statics.map(([name]) => name.toLowerCase()));
   const defaults = Object.entries(extra).filter(([name]) => !overridden.has(name.toLowerCase()));
   return Object.fromEntries([...defaults, ...statics, ...(entry ? [entry] : [])]);
 }
 
-/** The request headers for discovery: static config headers plus the `discovery` auth scheme's header. */
+/**
+ * The request headers for the OpenAI-format list: static config headers plus the `discovery` auth
+ * scheme's header. A static `anthropic-version` stays off this request: a gateway that picks its
+ * catalog by that header would answer with the Anthropic-format list here too. It still applies to
+ * the Anthropic-format request (anthropicListHeaders).
+ */
 export function discoveryHeaders(
   config: Pick<GatewayConfig, "headers" | "authHeaders">,
   credentials: GatewayCredentials | string | undefined,
 ): Record<string, string> {
-  return listHeaders(config, credentials, "discovery");
+  return listHeaders(config, credentials, "discovery", {}, ["anthropic-version"]);
 }
 
 /**
