@@ -350,7 +350,7 @@ describe("selectApi precedence", () => {
     assert.equal(selectApi(entry({ endpoints: ["/v1/chat/completions"], owned_by: "openai" }), config()), "openai-completions");
   });
 
-  it("3. owner: anthropic variants → messages, openai/azure → responses", () => {
+  it("5. owner: anthropic variants → messages, openai/azure → responses", () => {
     for (const owner of ["anthropic", "Anthropic", "vertex_ai-anthropic_models"]) {
       assert.equal(selectApi(entry({ owned_by: owner }), config({ defaultApi: "openai-completions" })), "anthropic-messages", owner);
     }
@@ -360,13 +360,26 @@ describe("selectApi precedence", () => {
     }
   });
 
-  it("3. owner beats the pi catalog", () => {
+  it("3 before 5: the pi catalog beats the owner (agentgateway reports owned_by openai for Claude)", () => {
     const parsed = parseModelEntry({ id: ANTHROPIC_ID, owned_by: "openai" });
     assert.ok(parsed);
-    assert.equal(selectApi(parsed, config()), "openai-responses");
+    assert.equal(selectApi(parsed, config()), "anthropic-messages");
+    const gpt = parseModelEntry({ id: OPENAI_ID, owned_by: "anthropic" });
+    assert.ok(gpt);
+    assert.equal(selectApi(gpt, config()), "openai-responses");
   });
 
-  it("4. pi catalog: anthropic id → messages, openai id → responses, also after a vendor prefix", () => {
+  it("4 before 5: a claude- id beats an openai owner", () => {
+    assert.equal(selectApi(entry({ id: "claude-future-9", owned_by: "openai" }), config()), "anthropic-messages");
+  });
+
+  it("5 before 6: an owner beats an other-provider catalog hit", () => {
+    const gemini = parseModelEntry({ id: getBuiltinModels("google")[0].id, owned_by: "openai" });
+    assert.ok(gemini);
+    assert.equal(selectApi(gemini, config()), "openai-responses");
+  });
+
+  it("3. pi catalog: anthropic id → messages, openai id → responses, also after a vendor prefix", () => {
     const cfg = config({ defaultApi: "openai-completions" });
     for (const [id, api] of [
       [ANTHROPIC_ID, "anthropic-messages"],
@@ -380,7 +393,7 @@ describe("selectApi precedence", () => {
     }
   });
 
-  it("3. ambiguous owners (hosts, aggregators, placeholders) are no signal", () => {
+  it("5. ambiguous owners (hosts, aggregators, placeholders) are no signal", () => {
     const cfg = config({ defaultApi: "openai-completions" });
     for (const owner of ["vertex", "bedrock", "azure_ai", "openrouter", "system", "library", ""]) {
       assert.equal(selectApi(entry({ owned_by: owner }), cfg), "openai-completions", JSON.stringify(owner));
@@ -391,7 +404,7 @@ describe("selectApi precedence", () => {
     assert.equal(selectApi(claude, cfg), "anthropic-messages");
   });
 
-  it("5. a claude- id unknown to pi's anthropic catalog → messages, also after a vendor prefix", () => {
+  it("4. a claude- id unknown to pi's anthropic catalog → messages, also after a vendor prefix", () => {
     const cfg = config({ defaultApi: "openai-completions" });
     for (const id of ["claude-future-9", "anthropic/claude-future-9", "a/b/claude-future-9"]) {
       const parsed = parseModelEntry({ id, owned_by: "vertex" });
@@ -400,7 +413,7 @@ describe("selectApi precedence", () => {
     }
   });
 
-  it("5 before 6: a Claude id only in an aggregator catalog still → messages", () => {
+  it("4 before 6: a Claude id only in an aggregator catalog still → messages", () => {
     // Aggregators (github-copilot, opencode, ...) list Claude ids with dotted versions that pi's
     // anthropic catalog spells differently; rule 6 would send these to chat completions.
     const aggregatorOnly = getBuiltinProviders()
@@ -434,7 +447,7 @@ describe("selectApi precedence", () => {
     assert.equal(model.reasoning, match.model.reasoning);
   });
 
-  it("5. defaultApi when nothing else matches", () => {
+  it("7. defaultApi when nothing else matches", () => {
     assert.equal(selectApi(entry({ owned_by: "someone" }), config({ defaultApi: "openai-completions" })), "openai-completions");
     assert.equal(selectApi(entry({}), config()), "openai-responses");
   });

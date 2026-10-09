@@ -125,14 +125,18 @@ First match wins:
 1. Config `models[id].api`.
 2. A hint from the gateway: an `api` field, or `endpoint` / `supported_endpoints` naming
    `/v1/messages`, `/v1/responses` or `/v1/chat/completions`.
-3. The owner (`owned_by`, `provider`, `litellm_provider`): anything Anthropic → Messages;
-   `openai`, `azure` → Responses. Hosting and aggregator owners — `vertex`, `bedrock`, `azure_ai`,
-   `openrouter`, `system`, `library` — say nothing about the protocol and are skipped.
-4. pi's built-in catalog has the id under `anthropic` → Messages, under `openai` → Responses.
-5. The id starts with `claude-` → Messages.
+3. pi's built-in catalog has the id under `anthropic` → Messages, under `openai` → Responses.
+4. The id starts with `claude-` (also after a `vendor/` prefix) → Messages.
+5. The owner (`owned_by`, `provider`, `litellm_provider`): anything Anthropic → Messages;
+   `openai`, `azure` → Responses. Hosting and aggregator owners (`vertex`, `bedrock`, `azure_ai`,
+   `openrouter`, `system`, `library`) say nothing about the protocol and are skipped.
 6. pi's built-in catalog has the id under any other provider (Google, xAI, Z.ai, ...) → Chat
    Completions.
 7. `defaultApi`.
+
+The model's own id (3, 4) comes before the owner (5) because some gateways report one owner for
+everything: [agentgateway](#agentgateway) lists every model, Claude included, as
+`owned_by: "openai"`.
 
 Catalog lookups also try the id without a `vendor/` prefix and with `-`/`.` swapped between digits,
 so `oss/zai-org/glm-5-3` finds pi's `glm-5.3`. The gateway's id is always what is sent back.

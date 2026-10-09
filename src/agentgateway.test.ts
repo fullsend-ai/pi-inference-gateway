@@ -39,6 +39,33 @@ const AGW_LIST = {
   ],
 };
 
+describe("D1: owned_by \"openai\" on every entry does not send Claude to /v1/responses", () => {
+  it("routes Claude to anthropic-messages although the gateway says owned_by: openai", () => {
+    const { models } = modelsFromList(AGW_LIST, config());
+    assert.deepEqual(
+      models.map((model) => [model.id, model.api]),
+      [
+        // Not in pi's anthropic/openai catalog, not claude-: the openai owner decides (agentgateway
+        // translates Responses to the model's chat backend; set `api` to use chat directly).
+        ["open-weight/glm-5-3", "openai-responses"],
+        ["claude-sonnet-5", "anthropic-messages"],
+        ["gpt-6-luna", "openai-responses"],
+      ],
+    );
+  });
+
+  it("a claude- id unknown to pi's catalog also beats the owner, with or without a vendor prefix", () => {
+    const { models } = modelsFromList(
+      { data: [{ id: "claude-future-9", owned_by: "openai" }, { id: "anthropic/claude-future-9", owned_by: "openai" }] },
+      config({ defaultApi: "openai-completions" }),
+    );
+    assert.deepEqual(
+      models.map((model) => model.api),
+      ["anthropic-messages", "anthropic-messages"],
+    );
+  });
+});
+
 describe("D3: wildcard list entries are dropped with one warning", () => {
   it("drops ids containing *", () => {
     const { entries, wildcards } = parseModelList(AGW_LIST);

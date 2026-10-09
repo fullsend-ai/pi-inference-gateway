@@ -152,9 +152,9 @@ vendor-prefixed open-weight id (`vendor/org/glm-5-3` style) works on all three p
    `INFERENCE_GATEWAY_EXTRA_MODELS=gpt-6-luna=openai-responses,vendor/org/glm-5-3=openai-completions`.
    Config-added models are also offered when discovery fails.
 
-Resulting selection order: config `api` → gateway `api`/endpoint hints → non-ambiguous owner →
-pi catalog under `anthropic`/`openai` → `claude-` id → pi catalog under any other provider (chat
-completions) → `defaultApi`.
+Resulting selection order (revised 2026-10-09 for agentgateway, see "agentgateway support"):
+config `api` → gateway `api`/endpoint hints → pi catalog under `anthropic`/`openai` → `claude-` id →
+non-ambiguous owner → pi catalog under any other provider (chat completions) → `defaultApi`.
 
 Open phase-5 risks recorded from the probe (no workaround yet): pi's openai-completions transport
 neither reads nor replays Gemini's `extra_content.google.thought_signature` (no occurrence in pi-ai

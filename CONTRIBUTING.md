@@ -101,6 +101,9 @@ See README, "How each model gets its API", for the order. Two points behind it:
 
 - **Hosting owners are no signal.** A proxy reports `owned_by: "vertex"` for Claude and Gemini
   alike, so `AMBIGUOUS_OWNERS` are skipped.
+- **The model's identity beats its owner.** agentgateway synthesises `/v1/models` with
+  `owned_by: "openai"` on every entry, Claude included, and answers Claude on `/v1/responses` with a
+  400. So the anthropic/openai catalog hit and the `claude-` rule run before the owner rule.
 - **The `claude-` rule runs before "any other catalog provider → completions".** pi's aggregator
   catalogs (`github-copilot`, `opencode`, `openrouter`, `vercel-ai-gateway`) list Claude ids too, and
   the lookup normalises `-`/`.`; without this order a Claude id missing from pi's `anthropic` catalog

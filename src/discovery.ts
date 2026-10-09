@@ -484,14 +484,16 @@ function isClaudeId(id: string): boolean {
  *   1. config `models[id].api`
  *   2. gateway hint: `api`, then `endpoint`/`inference_endpoint`/`supported_endpoints`/`endpoints`
  *      (messages for Anthropic owners, else responses, else chat)
- *   3. owner: anthropic → messages; openai/azure → responses; AMBIGUOUS_OWNERS say nothing
- *   4. pi's built-in catalog under `anthropic` → messages, under `openai` → responses
- *   5. a `claude-` id (also after a `vendor/` prefix) → messages
+ *   3. pi's built-in catalog under `anthropic` → messages, under `openai` → responses
+ *   4. a `claude-` id (also after a `vendor/` prefix) → messages
+ *   5. owner: anthropic → messages; openai/azure → responses; AMBIGUOUS_OWNERS say nothing
  *   6. pi's built-in catalog under any other provider → chat completions (never a native API such
  *      as google-generative-ai: a gateway speaks the three OpenAI/Anthropic protocols only)
  *   7. the provider's `defaultApi`
  *
- * 5 runs before 6 because aggregator catalogs (github-copilot, opencode, openrouter, ...) list
+ * The model's own identity (3, 4) beats the owner (5): agentgateway synthesises its list with
+ * `owned_by: "openai"` on every entry, Claude included, and Claude on /v1/responses is a 400 there.
+ * 4 runs before 6 because aggregator catalogs (github-copilot, opencode, openrouter, ...) list
  * Claude ids too; a Claude id missing from pi's `anthropic` catalog must still go to /v1/messages.
  */
 export function selectApi(
@@ -507,12 +509,13 @@ export function selectApi(
   const fromEndpoints = apiFromEndpoints(entry.endpoints, anthropicOwned);
   if (fromEndpoints) return fromEndpoints;
 
-  if (anthropicOwned) return "anthropic-messages";
-  if (entry.owners.some(isOpenAIOwner)) return "openai-responses";
-
   if (match?.source === "anthropic") return "anthropic-messages";
   if (match?.source === "openai") return "openai-responses";
   if (isClaudeId(entry.id)) return "anthropic-messages";
+
+  if (anthropicOwned) return "anthropic-messages";
+  if (entry.owners.some(isOpenAIOwner)) return "openai-responses";
+
   if (match) return "openai-completions";
 
   return config.defaultApi;
