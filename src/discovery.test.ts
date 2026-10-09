@@ -17,6 +17,7 @@ import {
   findCatalogModel,
   globMatch,
   isIncluded,
+  mergeModelLists,
   modelsFromList,
   parseModelEntry,
   parseModelList,
@@ -977,6 +978,22 @@ describe("discoverModels: OpenAI- and Anthropic-format lists", () => {
   it("a static anthropic-version header replaces the default, whatever its case", () => {
     const headers = anthropicListHeaders({ headers: { "Anthropic-Version": "2024-01-01" }, authHeaders: {} }, "tok");
     assert.deepEqual(headers, { "Anthropic-Version": "2024-01-01", "x-api-key": "tok" });
+  });
+});
+
+describe("mergeModelLists: shared wildcards", () => {
+  it("deduplicates more than 20 shared wildcard ids near the cap", () => {
+    const wildcards = Array.from({ length: 25 }, (_, index) => ({ id: `vendor-${index}/*` }));
+    const chat = Array.from({ length: LIMITS.maxModels - 30 }, (_, index) => ({ id: `chat-${index}` }));
+    const openai = parseModelList({ data: [...wildcards, ...chat] });
+    const anthropic = parseModelList({
+      data: [...wildcards, ...Array.from({ length: 10 }, (_, index) => ({ id: `claude-${index}` }))],
+    });
+    const merged = mergeModelLists(openai, anthropic);
+    assert.equal(merged.wildcardCount, 25, "shared wildcards are counted once");
+    assert.equal(merged.entries.length, LIMITS.maxModels - 25, "models and wildcards fill the cap exactly");
+    assert.equal(merged.entries.filter((entry) => entry.id.startsWith("claude-")).length, 5);
+    assert.equal(merged.dropped, 5, "only the models past the cap are dropped");
   });
 });
 

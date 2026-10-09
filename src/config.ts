@@ -89,15 +89,19 @@ export function discoveryDialects(config: Pick<GatewayConfig, "discovery">): rea
 }
 
 /**
- * A non-empty list of dialects (`["openai", "anthropic"]`), deduplicated and in canonical order, or
- * undefined (with a warning naming `label`) when it is anything else.
+ * A non-empty list of dialects (`["openai", "anthropic"]`), deduplicated and in canonical order.
+ * When it is anything else, warns (naming `label`) and keeps the valid entries, or `openai` alone
+ * when none is valid: a typo must not switch on a request the user may have meant to turn off.
  */
-export function parseDiscoveryDialects(raw: unknown, label: string, warnings: string[]): DiscoveryDialect[] | undefined {
-  if (!Array.isArray(raw) || raw.length === 0 || !raw.every(isDiscoveryDialect)) {
-    warnings.push(`${label} must be a non-empty list of ${DISCOVERY_DIALECTS.join(", ")}; using both`);
-    return undefined;
+export function parseDiscoveryDialects(raw: unknown, label: string, warnings: string[]): DiscoveryDialect[] {
+  const valid = Array.isArray(raw) ? DISCOVERY_DIALECTS.filter((dialect) => raw.includes(dialect)) : [];
+  const ok = Array.isArray(raw) && raw.length > 0 && raw.every(isDiscoveryDialect);
+  if (!ok) {
+    const used: DiscoveryDialect[] = valid.length > 0 ? valid : ["openai"];
+    warnings.push(`${label} must be a non-empty list of ${DISCOVERY_DIALECTS.join(", ")}; using ${used.join(", ")}`);
+    return used;
   }
-  return DISCOVERY_DIALECTS.filter((dialect) => raw.includes(dialect));
+  return valid;
 }
 
 /** Basic auth's username when nothing sets one (Praxis's documented default). */

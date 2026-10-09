@@ -398,6 +398,8 @@ export interface ParsedModelList {
   wildcards: string[];
   /** Distinct wildcard ids seen (within the cap); `wildcards` holds only the first few. */
   wildcardCount: number;
+  /** Every distinct wildcard id counted in `wildcardCount` (at most `LIMITS.maxModels`), for merging lists. */
+  wildcardIds: ReadonlySet<string>;
   /** Entries dropped as embedding, image, audio, rerank, ... models (see isNonChatEntry). */
   nonChat: number;
 }
@@ -443,6 +445,7 @@ export function parseModelList(body: unknown): ParsedModelList {
 
   const entries: GatewayModelEntry[] = [];
   const wildcards: string[] = [];
+  const wildcardIds = new Set<string>();
   const seen = new Set<string>();
   let wildcardCount = 0;
   let dropped = 0;
@@ -460,12 +463,13 @@ export function parseModelList(body: unknown): ParsedModelList {
     seen.add(entry.id);
     if (entry.id.includes("*")) {
       wildcardCount++;
+      wildcardIds.add(entry.id);
       if (wildcards.length < MAX_WILDCARD_SAMPLES) wildcards.push(entry.id);
       continue;
     }
     entries.push(entry);
   }
-  return { entries, dropped, wildcards, wildcardCount, nonChat };
+  return { entries, dropped, wildcards, wildcardCount, wildcardIds, nonChat };
 }
 
 /**
@@ -476,13 +480,21 @@ export function parseModelList(body: unknown): ParsedModelList {
  * distinct wildcard ids together stay capped at `LIMITS.maxModels`.
  */
 export function mergeModelLists(openai: ParsedModelList | undefined, anthropic: ParsedModelList | undefined): ParsedModelList {
-  const empty: ParsedModelList = { entries: [], dropped: 0, wildcards: [], wildcardCount: 0, nonChat: 0 };
+  const empty: ParsedModelList = {
+    entries: [],
+    dropped: 0,
+    wildcards: [],
+    wildcardCount: 0,
+    wildcardIds: new Set(),
+    nonChat: 0,
+  };
   const first = openai ?? empty;
   const second = anthropic ?? empty;
   const entries = [...first.entries];
   const seen = new Set(entries.map((entry) => entry.id));
   const wildcards = [...first.wildcards];
-  const repeatedWildcards = second.wildcards.filter((id) => first.wildcards.includes(id)).length;
+  // Deduplicate against every wildcard id, not just the warning samples.
+  const repeatedWildcards = [...second.wildcardIds].filter((id) => first.wildcardIds.has(id)).length;
   for (const id of second.wildcards) {
     if (!wildcards.includes(id) && wildcards.length < MAX_WILDCARD_SAMPLES) wildcards.push(id);
   }
@@ -497,7 +509,14 @@ export function mergeModelLists(openai: ParsedModelList | undefined, anthropic: 
     seen.add(entry.id);
     entries.push({ ...entry, api: entry.api ?? "anthropic-messages" });
   }
-  return { entries, dropped, wildcards, wildcardCount, nonChat: first.nonChat + second.nonChat };
+  return {
+    entries,
+    dropped,
+    wildcards,
+    wildcardCount,
+    wildcardIds: new Set([...first.wildcardIds, ...second.wildcardIds]),
+    nonChat: first.nonChat + second.nonChat,
+  };
 }
 
 /** The one warning for wildcard ids, or none. */

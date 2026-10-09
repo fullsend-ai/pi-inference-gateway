@@ -16,6 +16,13 @@ key. Add `fallbackModels` or config-added models to keep working while the gatew
 `"authHeader": { "anthropic-messages": "authorization" }`. A 401 on everything else but Claude is
 the reverse: `"openai-responses": "x-api-key"` and so on.
 
+**Claude models missing, or a `the Anthropic-format model list failed (...)` warning.** Discovery
+also sends an Anthropic-format list request. A 400, 401, 403, 404 or 405 on it is not reported, so a
+gateway that wants a different credential header there silently lists no Claude-only models: set
+`"authHeader": { "anthropic-messages": "authorization" }` as above. To stop the second request, use
+`"discovery": ["openai"]` or `INFERENCE_GATEWAY_DISCOVERY=openai`; see
+[Discovery: both list formats](configuration.md#discovery-both-list-formats).
+
 **A 400 naming a request field** (`tools.0.defer_loading`, `tool_stream`, `thinking`, ...). An
 inherited pi `compat` flag turned on a feature your gateway or its backend does not accept. Set that
 flag to `false` in `models["<id>"].compat`, or drop them all with `"compat": null`.
