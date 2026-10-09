@@ -111,7 +111,7 @@ For several gateways, per-model overrides or models the gateway does not list, a
 | `headers` | Extra headers on every request, discovery included. A header named like an auth header (`authorization`, `x-api-key`, or any header used in `authHeader`) is refused: credentials only come from the configured key, token or password. |
 | `modelsPath` | Model-list path, default `/v1/models`. |
 | `include` / `exclude` | `*` globs over listed model ids. |
-| `models` | Per-id overrides: `api`, `name`, `contextWindow`, `maxTokens`, `reasoning`, `input` (`["text","image"]`), `cost` (USD per million tokens), `compat` (see [Request features (`compat`)](#request-features-compat)). **An entry with an `api` whose id the gateway does not list adds that model.** |
+| `models` | Per-id overrides: `api`, `name`, `contextWindow`, `maxTokens`, `reasoning`, `input` (`["text","image"]`), `cost` (USD per million tokens), `compat` (see [Request features (`compat`)](#request-features-compat)), `thinkingLevelMap` (what each thinking level is sent as, see [Thinking levels](#thinking-levels-thinkinglevelmap)). **An entry with an `api` whose id the gateway does not list adds that model.** |
 | `fallbackModels` | Offered when discovery fails: ids or `{ "id": ..., "owned_by": ... }` objects. |
 
 When `INFERENCE_GATEWAY_BASE_URL` is also set, it configures the provider with the same id
@@ -224,6 +224,27 @@ against pi's own types (booleans, numbers, and enums such as `maxTokensField` or
 a wrong-typed value is dropped with a warning. Flag names pi does not declare pass through
 unchanged. `allowedFallbackModels` is never inherited and cannot be set: pi turns it into a
 `fallbacks` body field that only api.anthropic.com accepts.
+
+## Thinking levels (`thinkingLevelMap`)
+
+pi's thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max`. On Chat
+Completions pi sends a level as `reasoning_effort`, translated through the model's `thinkingLevelMap`
+when it has one (copied from pi's catalog on the same transport, like `compat`). Some catalog maps
+use values a gateway may not accept, such as `off: "off"`, and a gateway that validates
+`reasoning_effort` answers them with a 400 naming the value. Set what each level is sent as:
+
+```json
+"models": {
+  "oss/zai-org/glm-5-3": {
+    "api": "openai-completions",
+    "thinkingLevelMap": { "off": "none", "xhigh": null }
+  }
+}
+```
+
+A string is what the level is sent as; `null` hides that level in pi. The object is merged over the
+copied map; `"thinkingLevelMap": null` drops the copied map, so pi sends its own level names.
+`xhigh` and `max` are offered only when the map names them.
 
 ## When the model list changes
 

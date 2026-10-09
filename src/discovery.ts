@@ -17,7 +17,7 @@ import type {
   OpenAIResponsesCompat,
   ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import { authHeaderEntry, authHeaderFor, credentialHeaderNames, ENV, type CompatOverride, type GatewayCredentials, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
+import { authHeaderEntry, authHeaderFor, credentialHeaderNames, ENV, type CompatOverride, type GatewayCredentials, type ModelOverride, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
 
 export const LIMITS = {
   maxIdLength: 256,
@@ -580,25 +580,29 @@ function withApi(
   api: GatewayApi,
   core: ModelCore,
   catalog: Model<Api> | undefined,
-  override: CompatOverride | null | undefined,
+  override: Pick<ModelOverride, "compat" | "thinkingLevelMap">,
 ): GatewayModel {
   // thinkingLevelMap and compat describe how a *transport* shapes a request, so they are only
-  // copied from a catalog entry on the same transport.
-  const thinking = (map: ThinkingLevelMap | undefined) => (map ? { thinkingLevelMap: map } : {});
+  // copied from a catalog entry on the same transport. The config's map is merged over the copy
+  // (`null` drops it): what a level is sent as is the user's call, not a per-gateway table here.
+  const thinking = (copied: ThinkingLevelMap | undefined) => {
+    const map = override.thinkingLevelMap === null ? undefined : { ...copied, ...override.thinkingLevelMap };
+    return map && Object.keys(map).length > 0 ? { thinkingLevelMap: map } : {};
+  };
   switch (api) {
     case "anthropic-messages": {
       const same = catalog && hasApi(catalog, "anthropic-messages") ? catalog : undefined;
-      const compat = compatFor<AnthropicMessagesCompat>({}, anthropicCompat(same?.compat), override, api);
+      const compat = compatFor<AnthropicMessagesCompat>({}, anthropicCompat(same?.compat), override.compat, api);
       return { ...core, api, ...thinking(same?.thinkingLevelMap), ...(compat ? { compat } : {}) };
     }
     case "openai-responses": {
       const same = catalog && hasApi(catalog, "openai-responses") ? catalog : undefined;
-      const compat = compatFor<OpenAIResponsesCompat>({}, same?.compat, override, api);
+      const compat = compatFor<OpenAIResponsesCompat>({}, same?.compat, override.compat, api);
       return { ...core, api, ...thinking(same?.thinkingLevelMap), ...(compat ? { compat } : {}) };
     }
     case "openai-completions": {
       const same = catalog && hasApi(catalog, "openai-completions") ? catalog : undefined;
-      const compat = compatFor<OpenAICompletionsCompat>({}, same?.compat, override, api);
+      const compat = compatFor<OpenAICompletionsCompat>({}, same?.compat, override.compat, api);
       return { ...core, api, ...thinking(same?.thinkingLevelMap), ...(compat ? { compat } : {}) };
     }
   }
@@ -646,7 +650,7 @@ export function buildModel(entry: GatewayModelEntry, config: GatewayConfig): Gat
     maxTokens: firstDefined(override.maxTokens, entry.maxTokens, catalog?.maxTokens) ?? DEFAULTS.maxTokens,
     ...(Object.keys(config.headers).length > 0 ? { headers: { ...config.headers } } : {}),
   };
-  return withApi(api, core, catalog, override.compat);
+  return withApi(api, core, catalog, override);
 }
 
 /**

@@ -615,7 +615,7 @@ describe("compat overrides", () => {
     assert.ok(entry);
     const model = buildModel(entry, config({ models: { [withCompat.id]: { compat: null } } }));
     assert.equal(model.compat, undefined);
-    assert.ok(model.thinkingLevelMap === withCompat.thinkingLevelMap, "only compat is dropped");
+    assert.deepEqual(model.thinkingLevelMap, withCompat.thinkingLevelMap, "only compat is dropped");
   });
 
   it("applies to a model with no catalog compat", () => {

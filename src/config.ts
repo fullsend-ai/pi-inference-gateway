@@ -5,6 +5,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { validateCompat } from "./compat.ts";
 
 /** The three pi transports a gateway model can be routed to. */
@@ -91,6 +92,17 @@ export interface ModelOverride {
    * drops the copied compat entirely. Passed to pi as written: keys pi does not know are ignored.
    */
   compat?: CompatOverride | null;
+  /**
+   * pi `thinkingLevelMap`: what each thinking level is sent as (a string), or `null` to hide that
+   * level. Merged over the map copied from pi's catalog; `null` for the whole field drops the copy.
+   */
+  thinkingLevelMap?: ThinkingLevelMap | null;
+}
+
+const THINKING_LEVELS: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+function isThinkingLevel(value: string): value is ModelThinkingLevel {
+  return (THINKING_LEVELS as readonly string[]).includes(value);
 }
 
 /** JSON-primitive compat flags from the config file. */
@@ -291,6 +303,26 @@ function parseModelOverride(raw: unknown, where: string, warnings: string[]): Mo
       override.compat = checked.kept;
     } else {
       warnings.push(`${where}: "compat" must be an object of flags, or null to drop pi's catalog compat; ignored`);
+    }
+  }
+  if (raw.thinkingLevelMap === null) {
+    override.thinkingLevelMap = null;
+  } else if (raw.thinkingLevelMap !== undefined) {
+    if (isRecord(raw.thinkingLevelMap)) {
+      const levels: Array<[ModelThinkingLevel, string | null]> = [];
+      for (const [level, value] of Object.entries(raw.thinkingLevelMap)) {
+        const valid = value === null || (typeof value === "string" && value.length > 0 && value.length <= 64 && !hasControlChars(value));
+        if (!isThinkingLevel(level) || !valid) {
+          warnings.push(
+            `${where}: thinkingLevelMap.${level.slice(0, 64)} must be one of ${THINKING_LEVELS.join(", ")} mapped to a string or null; ignored`,
+          );
+          continue;
+        }
+        levels.push([level, value]);
+      }
+      override.thinkingLevelMap = Object.fromEntries(levels);
+    } else {
+      warnings.push(`${where}: "thinkingLevelMap" must be an object keyed by thinking level, or null to drop pi's catalog map; ignored`);
     }
   }
   return override;
