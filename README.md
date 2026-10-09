@@ -511,7 +511,7 @@ pi 0.99.2.
 | `401 authentication failure: no bearer token found` on Claude only | pi's native `x-api-key` on `/v1/messages` | `INFERENCE_GATEWAY_AUTH_HEADER=bearer` |
 | `model discovery failed (model list request returned HTTP 401: ...)` | no token, a wrong or expired token, or a wrong audience | check the token file and the token's `aud` |
 | `400 ... unsupported conversion: from Responses to provider anthropic (supported: [AnthropicMessages])` | a Claude model on `openai-responses` (an `api` in your config, or an old snapshot) | remove the `api`, or set `"anthropic-messages"` |
-| `403 ... Model authorization denied` | a claim rule on that model refuses your token | the gateway's per-model `authorization` rules |
+| `403` with a JSON "model authorization denied" error | a claim rule on that model refuses your token | the gateway's per-model `authorization` rules |
 | `404 ... model_not_found` | an id the gateway does not serve, or a wildcard id | use an id from `--list-models`, or add a concrete one via `models` |
 | `400 ... unknown variant ..., expected one of none, minimal, low, medium, high, xhigh, max` | a `reasoning_effort` value from a copied `thinkingLevelMap` | set it per model, see [Thinking levels](#thinking-levels-thinkinglevelmap) |
 
@@ -523,7 +523,7 @@ pasted from the mock):
 $ INFERENCE_GATEWAY_AUTH_HEADER= pi -ne -e . --no-session -p --model gateway/claude-sonnet-5 "say hi" </dev/null
 401 authentication failure: no bearer token found
 $ INFERENCE_GATEWAY_API_KEY=wrong pi -ne -e . --list-models
-[pi-inference-gateway] gateway: model discovery failed (model list request returned HTTP 401: authentication failure: no bearer token found); using 1 fallback model(s) plus pi's last saved list
+[pi-inference-gateway] gateway: model discovery failed (model list request returned HTTP 401: authentication failure: no bearer token found); using 2 fallback model(s) plus pi's last saved list
 ```
 
 ### Known incompatibilities
