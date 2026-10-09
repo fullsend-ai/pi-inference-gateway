@@ -34,51 +34,53 @@ export interface RuntimeDeps {
   warn?: (message: string) => void;
 }
 
-// --- auth header ------------------------------------------------------------------------------
+// --- request fetch --------------------------------------------------------------------------
 
 /**
- * A `fetch` that puts the token in exactly one header: `authorization: Bearer <token>`, or the raw
- * token in any other header such as `x-api-key`.
+ * The `fetch` every inference request goes through. Two jobs:
  *
- * Only used when the config overrides a transport's header. pi's Anthropic transport sends
- * `x-api-key` and the OpenAI ones `authorization: Bearer`; gateways differ in which they accept per
- * path (a Bearer-only gateway 401s Claude by default; a path-routing proxy in front of a Claude
- * backend 401s Bearer on /v1/messages). The rewrite removes both and sets the configured one, so
- * exactly one auth header leaves, whichever SDK built the request.
+ * 1. **Never follow a redirect** (`redirect: "error"`). Fetch strips only `authorization` on a
+ *    cross-origin redirect, so following one would hand `x-api-key` (or any custom credential
+ *    header) to whatever host the gateway redirects to. pi's SDK clients use the default `"follow"`,
+ *    and pi exposes no per-request redirect option, so the only hook is `options.fetch` — which is
+ *    why every transport is wrapped, not just the ones with a header override.
+ * 2. **Optionally move the token** to the configured header (`authorization` means
+ *    `Bearer <token>`, anything else carries the raw token), removing both native auth headers
+ *    first so exactly one leaves. Only when the config overrides that transport's header.
  *
  * `baseFetch` is resolved per call, not captured: `globalThis.fetch` is routinely replaced after
  * module load (proxy agents, test doubles, pi's own instrumentation).
  */
-export function createAuthHeaderFetch({
+export function createGatewayFetch({
   authHeader,
   token,
   baseFetch,
 }: {
-  authHeader: string;
+  authHeader?: string;
   token: string | undefined;
   baseFetch?: FetchFunction;
 }): FetchFunction {
   return async (input, init) => {
     const transport = baseFetch ?? globalThis.fetch;
-    if (!token) return transport(input, init);
+    if (authHeader === undefined || !token) return transport(input, { ...init, redirect: "error" });
     const headers = new Headers(input instanceof Request ? input.headers : undefined);
     new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
     headers.delete("authorization");
     headers.delete("x-api-key");
     headers.set(authHeader, authHeader === "authorization" ? `Bearer ${token}` : token);
-    return transport(input, { ...init, headers });
+    return transport(input, { ...init, headers, redirect: "error" });
   };
 }
 
 /**
- * One of pi's transports with every request routed through {@link createAuthHeaderFetch}. Built per
- * call so a caller-supplied `options.fetch` is composed *underneath*: it stays the transport that
- * dials, and the header rewrite runs first. The spread keeps optional members (`fetchDeferred`,
- * `cancelDeferred`) a pi release may add to the lazy wrapper.
+ * One of pi's transports with every request — streaming and deferred — routed through
+ * {@link createGatewayFetch}. Built per call so a caller-supplied `options.fetch` is composed
+ * *underneath*: it stays the transport that dials, and the rewrite runs first. The spread keeps
+ * optional members a pi release may add to the lazy wrapper.
  */
-export function withAuthHeader(base: ProviderStreams, authHeader: string): ProviderStreams {
+export function withGatewayFetch(base: ProviderStreams, authHeader: string | undefined): ProviderStreams {
   const fetchFor = (apiKey: string | undefined, fetch: FetchFunction | undefined) =>
-    createAuthHeaderFetch({ authHeader, token: apiKey, ...(fetch ? { baseFetch: fetch } : {}) });
+    createGatewayFetch({ ...(authHeader !== undefined ? { authHeader } : {}), token: apiKey, ...(fetch ? { baseFetch: fetch } : {}) });
   const wrapped: ProviderStreams = {
     ...base,
     stream: (model, context, options) =>
@@ -99,15 +101,12 @@ export function withAuthHeader(base: ProviderStreams, authHeader: string): Provi
 }
 
 /**
- * The `api` map: pi dispatches each model to the entry keyed by its `model.api`. Each transport
- * keeps its native auth header (`x-api-key` for Messages, Bearer for the OpenAI ones) unless the
- * config overrides that transport's header, and only then is it wrapped.
+ * The `api` map: pi dispatches each model to the entry keyed by its `model.api`. Every transport is
+ * wrapped (redirects are always refused); each keeps its native auth header (`x-api-key` for
+ * Messages, Bearer for the OpenAI ones) unless the config overrides that transport's header.
  */
 export function gatewayStreams(config: Pick<GatewayConfig, "authHeaders">): Record<GatewayApi, ProviderStreams> {
-  const transport = (api: GatewayApi, base: ProviderStreams) => {
-    const override = config.authHeaders[api];
-    return override === undefined ? base : withAuthHeader(base, override);
-  };
+  const transport = (api: GatewayApi, base: ProviderStreams) => withGatewayFetch(base, config.authHeaders[api]);
   return {
     "anthropic-messages": transport("anthropic-messages", anthropicMessagesApi()),
     "openai-responses": transport("openai-responses", openAIResponsesApi()),

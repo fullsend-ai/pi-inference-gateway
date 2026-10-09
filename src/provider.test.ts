@@ -6,7 +6,7 @@ import type { Context, FetchFunction, Model, ModelsPublication, Provider, Refres
 import type { GatewayApi, GatewayConfig } from "./config.ts";
 import { parseModelEntry, buildModel, extraModels, type GatewayModel } from "./discovery.ts";
 import {
-  createAuthHeaderFetch,
+  createGatewayFetch,
   createGatewayProvider,
   gatewayAuth,
   gatewayProviderOptions,
@@ -89,7 +89,7 @@ function providerModel(provider: Provider<GatewayApi>, id: string): Model<Gatewa
   return found;
 }
 
-describe("createAuthHeaderFetch", () => {
+describe("createGatewayFetch", () => {
   const capture = () => {
     const seen: Headers[] = [];
     const baseFetch: FetchFunction = async (input, init) => {
@@ -101,7 +101,7 @@ describe("createAuthHeaderFetch", () => {
 
   it("moves an x-api-key token to authorization: Bearer", async () => {
     const { seen, baseFetch } = capture();
-    const fetch = createAuthHeaderFetch({ authHeader: "authorization", token: "tok", baseFetch });
+    const fetch = createGatewayFetch({ authHeader: "authorization", token: "tok", baseFetch });
     await fetch("https://gw.example.com/v1/messages", { method: "POST", headers: { "x-api-key": "tok", "x-other": "1" } });
     assert.equal(seen[0].get("authorization"), "Bearer tok");
     assert.equal(seen[0].has("x-api-key"), false);
@@ -110,7 +110,7 @@ describe("createAuthHeaderFetch", () => {
 
   it("moves a Bearer token to a custom header", async () => {
     const { seen, baseFetch } = capture();
-    const fetch = createAuthHeaderFetch({ authHeader: "x-api-key", token: "tok", baseFetch });
+    const fetch = createGatewayFetch({ authHeader: "x-api-key", token: "tok", baseFetch });
     await fetch("https://gw.example.com/v1/responses", { headers: { authorization: "Bearer tok" } });
     assert.equal(seen[0].get("x-api-key"), "tok");
     assert.equal(seen[0].has("authorization"), false);
@@ -118,7 +118,7 @@ describe("createAuthHeaderFetch", () => {
 
   it("reads headers from a Request input", async () => {
     const { seen, baseFetch } = capture();
-    const fetch = createAuthHeaderFetch({ authHeader: "authorization", token: "tok", baseFetch });
+    const fetch = createGatewayFetch({ authHeader: "authorization", token: "tok", baseFetch });
     await fetch(new Request("https://gw.example.com/x", { headers: { "x-api-key": "tok", "x-keep": "y" } }));
     assert.equal(seen[0].get("authorization"), "Bearer tok");
     assert.equal(seen[0].get("x-keep"), "y");
@@ -127,7 +127,7 @@ describe("createAuthHeaderFetch", () => {
 
   it("passes the request through untouched without a token", async () => {
     const { seen, baseFetch } = capture();
-    const fetch = createAuthHeaderFetch({ authHeader: "authorization", token: undefined, baseFetch });
+    const fetch = createGatewayFetch({ authHeader: "authorization", token: undefined, baseFetch });
     await fetch("https://gw.example.com/x", { headers: { "x-api-key": "k" } });
     assert.equal(seen[0].get("x-api-key"), "k");
   });

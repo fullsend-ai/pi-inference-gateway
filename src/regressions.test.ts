@@ -52,6 +52,50 @@ function context(overrides: Partial<RefreshModelsContext> = {}): RefreshModelsCo
   };
 }
 
+describe("review 1: inference requests never follow redirects", () => {
+  for (const api of ["anthropic-messages", "openai-responses", "openai-completions"] as const) {
+    it(`${api}: sends redirect: "error" with no auth-header override`, async () => {
+      const redirects: string[] = [];
+      const fetch: FetchFunction = async (input, init) => {
+        const request = new Request(input, init);
+        redirects.push(request.redirect);
+        const body = JSON.parse(await request.text());
+        return new Response(sseFor(new URL(request.url).pathname, String(body.model), "ok"), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      };
+      const provider = createGatewayProvider(config(), { models: [model(`m-${api}`, api)], fresh: true }, { env: ENV });
+      const target = provider.getModels().find((entry) => entry.id === `m-${api}`);
+      assert.ok(target);
+      const message = await provider.streamSimple(target, CONTEXT, { apiKey: "tok", fetch }).result();
+      assert.equal(message.stopReason, "stop", message.errorMessage ?? "");
+      assert.deepEqual(redirects, ["error"]);
+    });
+  }
+
+  it("a redirecting gateway fails the request instead of forwarding x-api-key", async () => {
+    // Emulates fetch against a gateway answering 307 → another origin: with redirect: "error" the
+    // fetch rejects; with "follow" it re-sends to `location`, stripping only `authorization`
+    // cross-origin (Fetch spec), so `x-api-key` would reach the other host.
+    const leaked: (string | null)[] = [];
+    const fetch: FetchFunction = async (input, init) => {
+      const request = new Request(input, init);
+      if (request.redirect === "error") throw new TypeError("fetch failed: unexpected redirect");
+      const followed = new Headers(request.headers);
+      followed.delete("authorization");
+      leaked.push(followed.get("x-api-key"));
+      const body = JSON.parse(await request.text());
+      return new Response(sseFor("/v1/messages", String(body.model), "ok"), { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const provider = createGatewayProvider(config(), { models: [model("c", "anthropic-messages")], fresh: true }, { env: ENV });
+    const target = provider.getModels()[0];
+    const message = await provider.streamSimple(target, CONTEXT, { apiKey: "tok", fetch, maxRetries: 0 }).result();
+    assert.deepEqual(leaked, [], "the key was forwarded to the redirect target");
+    assert.equal(message.stopReason, "error");
+  });
+});
+
 describe("review 5: config model ids are validated like gateway ids", () => {
   it("skips override and extra-model ids that are blank, too long, or contain whitespace/control characters", () => {
     const { providers, warnings } = parseConfigFile(
