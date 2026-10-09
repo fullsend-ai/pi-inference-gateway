@@ -32,13 +32,22 @@ jobs:
           URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
           # The tag archive is what pinned consumers fetch (a sandbox Containerfile downloads it and
           # verifies this digest), so publish it in the notes rather than making everyone derive it.
+          # Download to a file and hash only a complete download: piping curl into sha256sum would
+          # hash partial (or empty) bytes when curl fails, and the loop would carry on with that.
+          ARCHIVE="$RUNNER_TEMP/release.tar.gz"
+          SHA=""
           for attempt in 1 2 3 4 5; do
-            if SHA=$(curl -fsSL --retry 3 "$URL" | sha256sum | cut -d' ' -f1) && [ -n "$SHA" ]; then
+            if curl -fsSL --retry 3 -o "$ARCHIVE" "$URL"; then
+              SHA=$(sha256sum "$ARCHIVE" | cut -d' ' -f1)
               break
             fi
             echo "archive not ready yet (attempt $attempt), retrying" >&2
             sleep 10
           done
+          if [ -z "$SHA" ]; then
+            echo "could not download $URL after 5 attempts" >&2
+            exit 1
+          fi
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
