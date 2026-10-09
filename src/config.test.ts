@@ -829,6 +829,51 @@ describe("local overlay file", () => {
     assert.ok(onlyShared.warnings[0].startsWith(`${SHARED}: providers.gateway.baseUrl`), onlyShared.warnings[0]);
   });
 
+  it("names baseUrlEnv and its variable in an env/file conflict, never the variable's value", async () => {
+    const conflictEnv = { INFERENCE_GATEWAY_BASE_URL: "https://gateway.example.com", CORP_URL: "https://other.example.com/tenant-7f3a9c" };
+    const fromVariable = JSON.stringify({ providers: { gateway: { baseUrlEnv: "CORP_URL", include: ["claude-*"] } } });
+    const { providers, warnings } = await loadConfig({ env: conflictEnv, home: HOME, readText: files({ [SHARED]: fromVariable }) });
+    assert.equal(warnings.length, 1, warnings.join("\n"));
+    assert.ok(
+      warnings[0].startsWith(
+        `${SHARED}: providers.gateway.baseUrlEnv (CORP_URL) is ignored: INFERENCE_GATEWAY_BASE_URL (https://gateway.example.com) configures this provider`,
+      ),
+      warnings[0],
+    );
+    assert.ok(!warnings[0].includes("other.example.com"), warnings[0]);
+    assert.ok(!warnings[0].includes("tenant-7f3a9c"), warnings[0]);
+    assert.equal(providers[0].baseUrl, "https://gateway.example.com");
+    assert.equal(providers[0].baseUrlEnv, undefined, "the merged base URL comes from the environment");
+    assert.deepEqual(providers[0].include, ["claude-*"]);
+
+    const literal = JSON.stringify({ providers: { gateway: { baseUrl: "https://other.example.com/tenant-7f3a9c" } } });
+    const fromLiteral = await loadConfig({ env: conflictEnv, home: HOME, readText: files({ [SHARED]: literal }) });
+    assert.equal(fromLiteral.warnings.length, 1, fromLiteral.warnings.join("\n"));
+    assert.ok(
+      fromLiteral.warnings[0].startsWith(`${SHARED}: providers.gateway.baseUrl (https://other.example.com/tenant-7f3a9c) is ignored`),
+      fromLiteral.warnings[0],
+    );
+  });
+
+  it("lets the overlay replace a literal baseUrl with baseUrlEnv", async () => {
+    const literalShared = JSON.stringify({
+      providers: { corp: { baseUrl: "https://shared.example.com", apiKeyEnv: "CORP_KEY", include: ["claude-*"] } },
+    });
+    const local = JSON.stringify({ providers: { corp: { baseUrlEnv: "CORP_URL" } } });
+    const { providers, warnings } = await loadConfig({
+      env: { CORP_URL: "http://127.0.0.1:4000/v1" },
+      home: HOME,
+      readText: files({ [SHARED]: literalShared, [LOCAL]: local }),
+    });
+    assert.deepEqual(warnings, []);
+    assert.equal(providers.length, 1);
+    const [corp] = providers;
+    assert.equal(corp.baseUrl, "http://127.0.0.1:4000");
+    assert.equal(corp.baseUrlEnv, "CORP_URL");
+    assert.equal(corp.apiKeyEnv, "CORP_KEY");
+    assert.deepEqual(corp.include, ["claude-*"]);
+  });
+
   it("reads the overlay from PI_CODING_AGENT_DIR and keeps __proto__ an ordinary key", async () => {
     const local = '{"providers":{"corp":{"models":{"__proto__":{"api":"openai-completions"}}}}}';
     const { providers } = await loadConfig({
