@@ -228,6 +228,9 @@ export INFERENCE_GATEWAY_EXTRA_MODELS=claude-sonnet-5=anthropic-messages,gpt-6-l
 ```
 
 or as `models` entries with an `api` in `inference-gateway.json` in that directory. Per-model
-`compat`, `thinkingLevelMap`, `contextWindow` and `maxTokens` need the file. A model left out makes
-pi warn `Model "<id>" not found for provider "<provider>"` (see
-[Troubleshooting](troubleshooting.md)).
+`compat`, `thinkingLevelMap`, `contextWindow` and `maxTokens` need the file. A model left out
+fails in one of two ways (see [Troubleshooting](troubleshooting.md)). If the provider offers at
+least one other model, pi warns `Model "<id>" not found for provider "<provider>". Using custom
+model id.` and uses the id with another gateway model's metadata, which may route it to the wrong
+API. If the provider offers no model at all, pi fails with
+`Model "<provider>/<id>" not found. Use --list-models to see available models.`
