@@ -3,14 +3,13 @@
 #
 # This file configures fullsend for per-repo installation mode.
 # See https://fullsend.sh/docs/guides/infrastructure/layered-config-reference
+#
+# Layering: .fullsend/config.base.yaml is fullsend-ai/fullsend's own .fullsend/config.yaml,
+# copied byte for byte at 003926f5cd3a (sha256 620f017aecedca67…). Runtime, roles, agents,
+# model aliases and status notifications come from there; refresh it by re-running
+#   fullsend github setup fullsend-ai/pi-inference-gateway --config <raw URL at a newer sha> --config-hash <sha256>
+# This file keeps only what is specific to this repository.
 version: "1"
-roles:
-    - triage
-    - coder
-    - review
-    - fix
-    - retro
-    - prioritize
 allowed_remote_resources:
     - https://raw.githubusercontent.com/fullsend-ai/fullsend/
     - https://raw.githubusercontent.com/fullsend-ai/agents/
