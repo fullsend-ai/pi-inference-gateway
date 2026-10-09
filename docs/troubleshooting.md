@@ -39,10 +39,12 @@ Set `models["<id>"].api` to the right transport.
 **A model works with curl but is not in the list.** The gateway does not list it. Add it with an
 `api` (config `models` or `INFERENCE_GATEWAY_EXTRA_MODELS`).
 
-**`Model "<id>" not found for provider "<provider>"` for a model the gateway lists.** pi runs
+**`Model "<id>" not found for provider "<provider>". Using custom model id.` or `Model "<provider>/<id>" not found. Use --list-models ...` for a model the gateway lists.** pi runs
 offline (`--offline` or `PI_OFFLINE`, as sandboxes and CI runners usually do) or with
 `INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS=0`, so the list is not fetched, and this
-`PI_CODING_AGENT_DIR` has no list saved by an interactive refresh. Add the model with its `api`
+`PI_CODING_AGENT_DIR` has no list saved by an interactive refresh. The warning appears only when
+the provider offers another model; pi then uses the id with that model's metadata, which may route
+it to the wrong API. With no model offered at all, pi fails with the second message. Add the model with its `api`
 (config `models` or `INFERENCE_GATEWAY_EXTRA_MODELS`); see
 [Sandboxes and CI](configuration.md#sandboxes-and-ci).
 

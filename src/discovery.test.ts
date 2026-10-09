@@ -377,6 +377,11 @@ describe("discovery error bodies without a content-type", () => {
     await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: html }), http(502));
   });
 
+  it("adds nothing for a BOM-less UTF-16 body that contains the credential", async () => {
+    const utf16 = new Uint8Array(Buffer.from(`invalid API key ${TOKEN}`, "utf16le"));
+    await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: untyped(401, utf16) }), http(401));
+  });
+
   it("adds nothing for an empty or non-UTF-8 body", async () => {
     await assert.rejects(discoverModels(config(), { token: TOKEN, fetch: untyped(401, "") }), http(401));
     const binary = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xff, 0xfe, 0x41]);

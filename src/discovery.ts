@@ -155,7 +155,9 @@ function componentsOfHeaders(headers: Record<string, string>): string[] {
  * The start of a `text/plain` error body, or of one with no (or an empty) content-type, for an
  * error message — only when it can be made safe:
  *   1. read at most ERROR_DETAIL_BYTES (+1, to know whether it was cut); an untyped body must be
- *      valid UTF-8 (a multi-byte character cut by the limit is fine), else nothing is shown;
+ *      valid UTF-8 (a multi-byte character cut by the limit is fine), else nothing is shown. An
+ *      untyped body with C0 control characters other than tab, LF and CR is not shown either (it
+ *      may be in another encoding, such as UTF-16, that the redaction cannot match);
  *   2. if any credential component is shorter than MIN_REDACTABLE_SECRET, show nothing but
  *      BODY_OMITTED (a short secret cannot be told apart from ordinary text);
  *   3. replace every occurrence of every component, embedded ones too, case-sensitively,
@@ -200,6 +202,10 @@ async function plainTextDetail(response: Response, secrets: readonly string[]): 
   } catch {
     return "";
   }
+  // Valid UTF-8 can still be text in another encoding: BOM-less UTF-16 ASCII is NUL-separated, so a
+  // credential in it would not match the redaction below. Real error text has no such controls.
+  // (A declared text/plain body keeps its established behavior: controls are flattened below.)
+  if (untyped && /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text)) return "";
   const ordered = [...secrets].sort((a, b) => b.length - a.length);
   for (const secret of ordered) text = text.split(secret).join("[redacted]");
   // After redacting, not before: a credential that was complete in the read is already replaced,
