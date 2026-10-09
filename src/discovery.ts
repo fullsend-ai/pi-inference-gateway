@@ -727,12 +727,15 @@ export async function discoverModels(config: GatewayConfig, options: DiscoverOpt
   return built.models;
 }
 
-/** A cached pi model as if the gateway had described it: its transport and metadata become hints. */
-function entryFromModel(model: Model<GatewayApi>): GatewayModelEntry {
+/**
+ * A cached pi model as if the gateway had described it: its metadata become hints, and so does its
+ * transport when `keepApi` (the snapshot was saved by the current selection rules).
+ */
+function entryFromModel(model: Model<GatewayApi>, keepApi: boolean): GatewayModelEntry {
   return {
     id: model.id,
     name: model.name,
-    api: model.api,
+    ...(keepApi ? { api: model.api } : {}),
     endpoints: [],
     owners: [],
     contextWindow: model.contextWindow,
@@ -756,8 +759,15 @@ function asGatewayModel(model: AnyModel): Model<GatewayApi> | undefined {
  * the new credential to the old host. So only the model's identity and metadata are kept: base
  * URL, headers, provider id, overrides, compat and include/exclude all come from the current config.
  * Entries from another provider id, non-chat entries, foreign APIs and invalid ids are dropped.
+ *
+ * `keepApi: false` (a snapshot from an older version of the selection rules) re-derives each
+ * model's transport through selectApi instead of trusting the saved one.
  */
-export function rebindModels(stored: readonly AnyModel[], config: GatewayConfig): GatewayModel[] {
+export function rebindModels(
+  stored: readonly AnyModel[],
+  config: GatewayConfig,
+  { keepApi = true }: { keepApi?: boolean } = {},
+): GatewayModel[] {
   const rebound: GatewayModel[] = [];
   const seen = new Set<string>();
   for (const cached of stored) {
@@ -767,7 +777,7 @@ export function rebindModels(stored: readonly AnyModel[], config: GatewayConfig)
     const configured = modelOverride(config, model.id)?.api !== undefined;
     if (!configured && !isIncluded(model.id, config)) continue;
     seen.add(model.id);
-    rebound.push(buildModel(entryFromModel(model), config));
+    rebound.push(buildModel(entryFromModel(model, keepApi), config));
   }
   return rebound;
 }

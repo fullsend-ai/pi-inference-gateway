@@ -3,10 +3,11 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createModels, InMemoryModelsStore } from "@earendil-works/pi-ai";
 import type { FetchFunction, ModelsPublication, RefreshModelsContext } from "@earendil-works/pi-ai";
-import type { GatewayConfig } from "./config.ts";
-import { LIMITS, discoverModels, modelsFromList, parseModelList } from "./discovery.ts";
-import { createGatewayProvider, initialModels } from "./provider.ts";
+import type { GatewayApi, GatewayConfig } from "./config.ts";
+import { LIMITS, buildModel, discoverModels, modelsFromList, parseModelEntry, parseModelList, type GatewayModel } from "./discovery.ts";
+import { SNAPSHOT_STAMP, createGatewayProvider, initialModels } from "./provider.ts";
 
 function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
@@ -100,6 +101,48 @@ describe("lesson 1: an all-invalid or empty list is a failure, not an empty cata
     const result = await initialModels(config(), { env: ENV, fetch });
     assert.equal(result.fresh, true);
     assert.deepEqual(modelsFromList([], config()).models, []);
+  });
+});
+
+describe("lesson 5: persisted snapshots are version-stamped", () => {
+  function stale(id: string, api: GatewayApi): GatewayModel {
+    const entry = parseModelEntry({ id, api });
+    assert.ok(entry);
+    return buildModel(entry, config());
+  }
+
+  it("an unstamped (older) snapshot re-derives each model's api from the current rules", async () => {
+    // Saved before D1: agentgateway's owned_by "openai" had put Claude on Responses.
+    const provider = createGatewayProvider(config(), { models: [], fresh: false }, { env: ENV });
+    assert.ok(provider.refreshModels);
+    await provider.refreshModels(refreshContext({ stored: { models: [stale("claude-sonnet-5", "openai-responses")] } }).context);
+    assert.deepEqual(
+      provider.getModels().map((model) => [model.id, model.api]),
+      [["claude-sonnet-5", "anthropic-messages"]],
+    );
+  });
+
+  it("a snapshot with the current stamp keeps the api it was saved with (it may have come from a gateway hint)", async () => {
+    const provider = createGatewayProvider(config(), { models: [], fresh: false }, { env: ENV });
+    assert.ok(provider.refreshModels);
+    const stored = { models: [stale("hinted-model", "openai-completions")], etag: SNAPSHOT_STAMP };
+    await provider.refreshModels(refreshContext({ stored }).context);
+    assert.deepEqual(
+      provider.getModels().map((model) => [model.id, model.api]),
+      [["hinted-model", "openai-completions"]],
+    );
+  });
+
+  it("a network refresh persists the stamp, and pi's real store hands it back", async () => {
+    const store = new InMemoryModelsStore();
+    const { fetch } = listFetch({ data: [{ id: "a" }] });
+    const models = createModels({ modelsStore: store });
+    models.setProvider(createGatewayProvider(config(), { models: [], fresh: false }, { env: ENV, fetch }));
+    const result = await models.refresh({ allowNetwork: true });
+    assert.equal(result.errors.size, 0);
+    const saved = await store.read("gateway");
+    assert.equal(saved?.etag, SNAPSHOT_STAMP);
+    assert.deepEqual(ids(saved?.models ?? []), ["a"]);
   });
 });
 

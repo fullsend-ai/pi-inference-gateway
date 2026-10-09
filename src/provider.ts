@@ -37,6 +37,17 @@ export const LOG_PREFIX = "[pi-inference-gateway]";
  */
 export const FACTORY_DISCOVERY_TIMEOUT_MS = 5_000;
 
+/**
+ * Version stamp of a persisted model snapshot. Bump the suffix whenever selectApi's rules change:
+ * a restored model then has its transport re-derived instead of keeping the one it was saved with.
+ *
+ * It travels in the snapshot's `etag`: `ModelsStoreEntry` has no other free-form field, and pi reads
+ * `etag` only in the remote-catalog wrapper it puts around its *built-in* providers
+ * (pi-coding-agent `core/remote-catalog-provider.js`), never for a provider that owns its own
+ * `refreshModels` like this one. A snapshot without it predates the stamp.
+ */
+export const SNAPSHOT_STAMP = "pi-inference-gateway/2";
+
 /** Ambient environment the provider reads at request time; injectable for tests. */
 export interface RuntimeDeps {
   env?: Record<string, string | undefined>;
@@ -273,7 +284,8 @@ export function createGatewayProvider(
 
   const refreshModels = async (context: RefreshModelsContext): Promise<void> => {
     if (!fresh && context.stored) {
-      const restored = mergeById(initial.models, rebindModels(context.stored.models, config));
+      const keepApi = context.stored.etag === SNAPSHOT_STAMP;
+      const restored = mergeById(initial.models, rebindModels(context.stored.models, config, { keepApi }));
       const published = await context.publish({
         update: () => {
           current = restored;
@@ -292,7 +304,11 @@ export function createGatewayProvider(
     await context.publish({
       // Static headers are config, not catalog: they stay out of pi's models-store file and are
       // rebuilt from the current config on restore (rebindModels).
-      persist: { models: fetched.map((model) => ({ ...model, headers: undefined })), checkedAt: Date.now() },
+      persist: {
+        models: fetched.map((model) => ({ ...model, headers: undefined })),
+        checkedAt: Date.now(),
+        etag: SNAPSHOT_STAMP,
+      },
       update: () => {
         current = fetched;
         fresh = true;
