@@ -180,9 +180,17 @@ the API that open-weight servers implement most widely.
 thinking model needs its own reasoning back every turn. pi does this on Chat Completions: it replays
 a thinking block in the field it arrived in (`reasoning_content`, `reasoning` or `reasoning_text`),
 or as `reasoning_details` when the response included them (pi-ai 0.99.2 and 1.1.0). So open-weight
-models lose nothing there. GLM ids that match pi's Z.ai catalog entries (for example glm-5.3) also
-inherit pi's `zai` thinking format, which sends `clear_thinking: false`. For other GLM ids, set
-`models[id].compat.thinkingFormat: "zai"`.
+models lose nothing there. GLM ids that match pi's Z.ai catalog entries (for example `glm-5.3`) also
+inherit pi's `zai` thinking format, which sends `clear_thinking: false`. For other GLM ids, setting
+`compat.thinkingFormat: "zai"` is not enough: pi only shapes the request for Z.ai when the model
+has `reasoning: true`, and the gateway's `supports_reasoning` or `reasoning` field, or
+`models[id].reasoning: true`, has to supply that. Route the model to `openai-completions` and use a
+thinking level other than off, since `clear_thinking: false` is sent only when a reasoning effort is
+set. For example:
+
+```json
+"models": { "my-glm": { "api": "openai-completions", "reasoning": true, "compat": { "thinkingFormat": "zai" } } }
+```
 
 On one open-weight deployment (a GLM model served by vLLM, pi 1.1.0), the same three-step tool task
 with thinking at `medium` ran three times per API. All nine runs answered correctly. Mean wall time
