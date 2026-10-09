@@ -96,6 +96,90 @@ describe("review 1: inference requests never follow redirects", () => {
   });
 });
 
+describe("review 2: a restored snapshot is rebound to the current connection", () => {
+  it("uses the current baseUrl and headers, not the cached ones", async () => {
+    const old = config({ baseUrl: "https://old.example.com", headers: { "x-old": "1" } });
+    const cached = [model("gpt-q", "openai-responses", old), model("claude-q", "anthropic-messages", old)];
+    const current = config({ baseUrl: "https://new.example.com", headers: { "x-new": "2" } });
+    const provider = createGatewayProvider(current, { models: [], fresh: false }, { env: ENV });
+    assert.ok(provider.refreshModels);
+    await provider.refreshModels(context({ stored: { models: cached } }));
+    const restored = provider.getModels();
+    assert.deepEqual(
+      restored.map((entry) => [entry.id, entry.baseUrl, entry.headers]),
+      [
+        ["gpt-q", "https://new.example.com/v1", { "x-new": "2" }],
+        ["claude-q", "https://new.example.com", { "x-new": "2" }],
+      ],
+    );
+  });
+
+  it("applies current overrides and filters to the cached models", async () => {
+    const cached = [model("gpt-q", "openai-responses"), model("drop-me", "openai-responses")];
+    const current = config({ exclude: ["drop-*"], models: { "gpt-q": { api: "openai-completions", maxTokens: 7 } } });
+    const provider = createGatewayProvider(current, { models: [], fresh: false }, { env: ENV });
+    assert.ok(provider.refreshModels);
+    await provider.refreshModels(context({ stored: { models: cached } }));
+    assert.deepEqual(
+      provider.getModels().map((entry) => [entry.id, entry.api, entry.maxTokens]),
+      [["gpt-q", "openai-completions", 7]],
+    );
+  });
+
+  it("drops cached entries from another provider id", async () => {
+    const foreign = model("x", "openai-responses", config({ id: "other" }));
+    const provider = createGatewayProvider(config(), { models: [], fresh: false }, { env: ENV });
+    assert.ok(provider.refreshModels);
+    await provider.refreshModels(context({ stored: { models: [foreign] } }));
+    assert.deepEqual(ids(provider.getModels()), []);
+  });
+});
+
+describe("review 3: a successful refresh replaces the startup list (through pi's real Models)", () => {
+  function gateway(lists: unknown[]) {
+    let call = 0;
+    const fetch: FetchFunction = async () => new Response(JSON.stringify(lists[Math.min(call++, lists.length - 1)]), { status: 200 });
+    return { fetch, deps: { env: ENV, fetch } };
+  }
+
+  it("removes a model the gateway dropped, and clears on an empty list", async () => {
+    const { deps } = gateway([{ data: [{ id: "a" }, { id: "b" }] }, { data: [{ id: "a" }] }, { data: [] }]);
+    const cfg = config();
+    const startup = await initialModels(cfg, deps);
+    assert.equal(startup.fresh, true);
+    const models = createModels({ modelsStore: new InMemoryModelsStore() });
+    models.setProvider(createGatewayProvider(cfg, startup, deps));
+    assert.deepEqual(ids(models.getModels("gateway")), ["a", "b"]);
+
+    const first = await models.refresh({ allowNetwork: true });
+    assert.equal(first.errors.size, 0, [...first.errors.values()].join());
+    assert.deepEqual(ids(models.getModels("gateway")), ["a"]);
+
+    const second = await models.refresh({ allowNetwork: true });
+    assert.equal(second.errors.size, 0, [...second.errors.values()].join());
+    assert.deepEqual(ids(models.getModels("gateway")), []);
+  });
+
+  it("a later process restores the persisted list when its own discovery fails", async () => {
+    const store = new InMemoryModelsStore();
+    const online = gateway([{ data: [{ id: "a" }] }, { data: [{ id: "a" }, { id: "c" }] }]);
+    const cfg = config();
+    const first = createModels({ modelsStore: store });
+    first.setProvider(createGatewayProvider(cfg, await initialModels(cfg, online.deps), online.deps));
+    await first.refresh({ allowNetwork: true });
+    assert.deepEqual(ids(first.getModels("gateway")), ["a", "c"]);
+
+    const down: FetchFunction = async () => {
+      throw new TypeError("fetch failed");
+    };
+    const offlineDeps = { env: ENV, fetch: down, warn: () => {} };
+    const second = createModels({ modelsStore: store });
+    second.setProvider(createGatewayProvider(cfg, await initialModels(cfg, offlineDeps), offlineDeps));
+    await second.refresh({ allowNetwork: false });
+    assert.deepEqual(ids(second.getModels("gateway")), ["a", "c"]);
+  });
+});
+
 describe("review 5: config model ids are validated like gateway ids", () => {
   it("skips override and extra-model ids that are blank, too long, or contain whitespace/control characters", () => {
     const { providers, warnings } = parseConfigFile(

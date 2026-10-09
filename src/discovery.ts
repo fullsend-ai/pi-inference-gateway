@@ -7,6 +7,7 @@ import { hasApi } from "@earendil-works/pi-ai";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import type {
   AnthropicMessagesCompat,
+  AnyModel,
   Api,
   FetchFunction,
   Model,
@@ -609,6 +610,51 @@ export async function discoverModels(config: GatewayConfig, options: DiscoverOpt
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   });
   return modelsFromList(body, config).models;
+}
+
+/** A cached pi model as if the gateway had described it: its transport and metadata become hints. */
+function entryFromModel(model: Model<GatewayApi>): GatewayModelEntry {
+  return {
+    id: model.id,
+    name: model.name,
+    api: model.api,
+    endpoints: [],
+    owners: [],
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    reasoning: model.reasoning,
+    vision: model.input.includes("image"),
+    cost: { input: model.cost.input, output: model.cost.output, cacheRead: model.cost.cacheRead, cacheWrite: model.cost.cacheWrite },
+  };
+}
+
+function asGatewayModel(model: AnyModel): Model<GatewayApi> | undefined {
+  if (hasApi(model, "anthropic-messages")) return model;
+  if (hasApi(model, "openai-responses")) return model;
+  if (hasApi(model, "openai-completions")) return model;
+  return undefined;
+}
+
+/**
+ * Rebuild models from pi's persisted snapshot against the *current* config. A snapshot carries the
+ * base URL and headers it was saved with; restoring it as-is after the config changed would send
+ * the new credential to the old host. So only the model's identity and metadata are kept: base
+ * URL, headers, provider id, overrides, compat and include/exclude all come from the current config.
+ * Entries from another provider id, non-chat entries, foreign APIs and invalid ids are dropped.
+ */
+export function rebindModels(stored: readonly AnyModel[], config: GatewayConfig): GatewayModel[] {
+  const rebound: GatewayModel[] = [];
+  const seen = new Set<string>();
+  for (const cached of stored) {
+    if (cached.provider !== config.id || seen.has(cached.id) || !isValidModelId(cached.id)) continue;
+    const model = asGatewayModel(cached);
+    if (!model) continue;
+    const configured = modelOverride(config, model.id)?.api !== undefined;
+    if (!configured && !isIncluded(model.id, config)) continue;
+    seen.add(model.id);
+    rebound.push(buildModel(entryFromModel(model), config));
+  }
+  return rebound;
 }
 
 /** Models from the config's `fallbackModels` (same entry shapes as the gateway list), plus config-added models. */

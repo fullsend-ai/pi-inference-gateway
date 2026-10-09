@@ -15,7 +15,7 @@ import type {
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { loadConfig, resolveToken, type GatewayApi, type GatewayConfig, type LoadConfigDeps } from "./config.ts";
-import { discoverModels, fallbackModels, type GatewayModel } from "./discovery.ts";
+import { discoverModels, fallbackModels, rebindModels, type GatewayModel } from "./discovery.ts";
 
 export const LOG_PREFIX = "[pi-inference-gateway]";
 
@@ -141,6 +141,10 @@ export function gatewayAuth(config: GatewayConfig, deps: RuntimeDeps = {}): ApiK
 
 // --- provider ---------------------------------------------------------------------------------
 
+/**
+ * What createProvider gets: auth, the transport map and a static model list. No `fetchModels` —
+ * {@link createGatewayProvider} owns refresh itself (see there).
+ */
 export function gatewayProviderOptions(
   config: GatewayConfig,
   models: readonly GatewayModel[],
@@ -152,45 +156,71 @@ export function gatewayProviderOptions(
     baseUrl: config.baseUrl,
     auth: { apiKey: gatewayAuth(config, deps) },
     models,
-    // Interactive and RPC sessions refresh from the network; `-p` and `--list-models` never do
-    // (they refresh with allowNetwork: false), which is why discovery also runs in the factory.
-    fetchModels: async (context: RefreshModelsContext) =>
-      discoverModels(config, {
-        token: await resolveToken(config, deps.env ?? process.env, deps.readText),
-        signal: context.signal,
-        ...(deps.fetch ? { fetch: deps.fetch } : {}),
-      }),
     api: gatewayStreams(config),
   };
 }
 
+/** `overlay` entries replace same-id `base` entries; the rest are appended. */
+function mergeById(base: readonly GatewayModel[], overlay: readonly GatewayModel[]): GatewayModel[] {
+  const ids = new Set(overlay.map((model) => model.id));
+  return [...base.filter((model) => !ids.has(model.id)), ...overlay];
+}
+
 /**
- * pi's provider for one gateway.
+ * pi's provider for one gateway: createProvider for auth and stream dispatch, with the model list
+ * owned here.
  *
- * `fresh` says the static `models` came from a discovery that just succeeded. createProvider
- * restores pi's persisted snapshot over the static list on every refresh — including offline ones —
- * replacing same-id entries and re-adding models the gateway has since dropped. With a fresh list
- * that snapshot can only be staler, so it is withheld; after a failed discovery it is exactly the
- * fallback we want, so it is left alone.
+ * createProvider keeps `models` as an immutable baseline and merges refreshed models *over* it, so a
+ * refresh could never remove a startup model, and an empty list could never clear them. Instead
+ * this provider answers `getModels()` from its own list, which a successful network refresh
+ * replaces outright (and persists through `context.publish`, pi's public refresh contract).
+ *
+ * The persisted snapshot is restored only while the list is not fresh — after a failed load-time
+ * discovery — and always through {@link rebindModels}, so it picks up the current base URL,
+ * headers and overrides. After a fresh discovery the snapshot can only be staler, so it is ignored.
+ * `pi -p` and `--list-models` refresh offline, so they see the startup list (or the rebound
+ * snapshot); interactive sessions also fetch.
  */
 export function createGatewayProvider(
   config: GatewayConfig,
   initial: { models: readonly GatewayModel[]; fresh: boolean },
   deps: RuntimeDeps = {},
 ): Provider<GatewayApi> {
-  const provider = createProvider(gatewayProviderOptions(config, initial.models, deps));
-  const refresh = provider.refreshModels;
-  if (!initial.fresh || !refresh) return provider;
+  const inner = createProvider(gatewayProviderOptions(config, [], deps));
+  let fresh = initial.fresh;
+  let current: readonly GatewayModel[] = initial.models;
+
+  const refreshModels = async (context: RefreshModelsContext): Promise<void> => {
+    if (!fresh && context.stored) {
+      const restored = mergeById(initial.models, rebindModels(context.stored.models, config));
+      const published = await context.publish({
+        update: () => {
+          current = restored;
+        },
+      });
+      if (!published) return;
+    }
+    if (!context.allowNetwork || context.signal.aborted) return;
+    const fetched = await discoverModels(config, {
+      token: await resolveToken(config, deps.env ?? process.env, deps.readText),
+      signal: context.signal,
+      ...(deps.fetch ? { fetch: deps.fetch } : {}),
+    });
+    if (context.signal.aborted) return;
+    await context.publish({
+      persist: { models: fetched, checkedAt: Date.now() },
+      update: () => {
+        current = fetched;
+        fresh = true;
+      },
+    });
+  };
+
   return {
-    ...provider,
-    refreshModels: (context: RefreshModelsContext) =>
-      refresh({
-        publish: (publication) => context.publish(publication),
-        allowNetwork: context.allowNetwork,
-        signal: context.signal,
-        ...(context.force !== undefined ? { force: context.force } : {}),
-        ...(context.credential !== undefined ? { credential: context.credential } : {}),
-      }),
+    ...inner,
+    getModels: () => current,
+    getAllModels: () => current,
+    refreshModels,
   };
 }
 

@@ -145,7 +145,8 @@ describe("createProvider integration", () => {
         ["acme/test-chat", "openai-completions", "https://gw.example.com/v1"],
       ],
     );
-    assert.equal(typeof provider.refreshModels, "function", "fetchModels makes it a dynamic provider");
+    const dynamic = createGatewayProvider(config(), { models: [], fresh: true }, { env: { GW_KEY: "tok" } });
+    assert.equal(typeof dynamic.refreshModels, "function", "refreshModels makes it a dynamic provider");
   });
 
   it("uses ambient api-key auth only: no login, no oauth", () => {
