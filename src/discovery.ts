@@ -700,6 +700,8 @@ export function buildModel(entry: GatewayModelEntry, config: GatewayConfig): Gat
     ...(tiers ? { tiers } : {}),
   };
 
+  const contextWindow =
+    firstDefined(override.contextWindow, entry.contextWindow, catalog?.contextWindow) ?? DEFAULTS.contextWindow;
   const core: ModelCore = {
     id: entry.id,
     name: firstDefined(override.name, entry.name, catalog?.name) ?? entry.id,
@@ -708,9 +710,9 @@ export function buildModel(entry: GatewayModelEntry, config: GatewayConfig): Gat
     reasoning: firstDefined(override.reasoning, entry.reasoning, catalog?.reasoning) ?? false,
     input: vision ? ["text", "image"] : ["text"],
     cost,
-    contextWindow:
-      firstDefined(override.contextWindow, entry.contextWindow, catalog?.contextWindow) ?? DEFAULTS.contextWindow,
-    maxTokens: firstDefined(override.maxTokens, entry.maxTokens, catalog?.maxTokens) ?? DEFAULTS.maxTokens,
+    contextWindow,
+    // A reply cannot be longer than the window it shares with the prompt.
+    maxTokens: Math.min(firstDefined(override.maxTokens, entry.maxTokens, catalog?.maxTokens) ?? DEFAULTS.maxTokens, contextWindow),
     ...(Object.keys(config.headers).length > 0 ? { headers: { ...config.headers } } : {}),
   };
   return withApi(api, core, catalog, override);
@@ -735,11 +737,45 @@ export interface ModelsFromList {
   warnings: string[];
 }
 
+/**
+ * One warning when gateway-reported context windows are 4x or more off pi's catalog for the same
+ * model: relays commonly stamp one placeholder window on every model, and the gateway's value wins
+ * over the catalog. Models whose window the config sets are not checked.
+ */
+function placeholderWindowWarning(entries: readonly GatewayModelEntry[], config: GatewayConfig): string[] {
+  const shared = new Map<number, number>();
+  for (const entry of entries) {
+    if (entry.contextWindow !== undefined) shared.set(entry.contextWindow, (shared.get(entry.contextWindow) ?? 0) + 1);
+  }
+  const suspicious: string[] = [];
+  const repeated = new Set<number>();
+  for (const entry of entries) {
+    const reported = entry.contextWindow;
+    if (reported === undefined || modelOverride(config, entry.id)?.contextWindow !== undefined) continue;
+    const known = findCatalogModel(entry.id)?.model.contextWindow;
+    if (!known || Math.max(reported, known) < 4 * Math.min(reported, known)) continue;
+    suspicious.push(`${entry.id} (gateway ${reported}, pi's catalog ${known})`);
+    if ((shared.get(reported) ?? 0) >= 3) repeated.add(reported);
+  }
+  if (suspicious.length === 0) return [];
+  const shown = suspicious.slice(0, 3).join(", ") + (suspicious.length > 3 ? ` (+${suspicious.length - 3} more)` : "");
+  const same = [...repeated].map((value) => `${shared.get(value)} listed models report the same ${value}`).join("; ");
+  return [
+    `context window 4x or more off pi's catalog: ${shown}${same ? `; ${same}` : ""}. ` +
+      `The gateway may report a placeholder; its value is used. Set models[id].contextWindow (and maxTokens) if it is wrong`,
+  ];
+}
+
 function buildFromParsed(parsed: ParsedModelList, config: GatewayConfig): ModelsFromList {
   const { entries, dropped, wildcards } = parsed;
-  const listed = entries.filter((entry) => isIncluded(entry.id, config)).map((entry) => buildModel(entry, config));
+  const included = entries.filter((entry) => isIncluded(entry.id, config));
+  const listed = included.map((entry) => buildModel(entry, config));
   const listedIds = new Set(entries.map((entry) => entry.id));
-  return { models: [...listed, ...extraModels(config, listedIds)], dropped, warnings: wildcardWarning(wildcards) };
+  return {
+    models: [...listed, ...extraModels(config, listedIds)],
+    dropped,
+    warnings: [...wildcardWarning(wildcards), ...placeholderWindowWarning(included, config)],
+  };
 }
 
 /** Parse, filter, build, and append config-added models. Throws only on an unusable body shape. */

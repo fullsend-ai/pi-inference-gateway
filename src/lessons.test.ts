@@ -4,6 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createModels, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import type { FetchFunction, ModelsPublication, Provider, RefreshModelsContext } from "@earendil-works/pi-ai";
 import { loadConfig, type GatewayApi, type GatewayConfig } from "./config.ts";
 import { LIMITS, buildModel, discoverModels, modelsFromList, parseModelEntry, parseModelList, type GatewayModel } from "./discovery.ts";
@@ -236,6 +237,44 @@ describe("lesson 5: persisted snapshots are version-stamped", () => {
     const saved = await store.read("gateway");
     assert.equal(saved?.etag, SNAPSHOT_STAMP);
     assert.deepEqual(ids(saved?.models ?? []), ["a"]);
+  });
+});
+
+describe("lesson 6: maxTokens never exceeds contextWindow; placeholder windows are reported", () => {
+  it("caps maxTokens at contextWindow, whatever the source", () => {
+    const fromGateway = modelsFromList({ data: [{ id: "small", context_window: 8192, max_output_tokens: 32768 }] }, config()).models[0];
+    assert.equal(fromGateway.maxTokens, 8192);
+    const fromConfig = buildModel({ id: "cfg", endpoints: [], owners: [] }, config({ models: { cfg: { contextWindow: 4096 } } }));
+    assert.equal(fromConfig.maxTokens, 4096, "the 16K default is capped too");
+    const fine = modelsFromList({ data: [{ id: "big", context_window: 200000, max_output_tokens: 32768 }] }, config()).models[0];
+    assert.equal(fine.maxTokens, 32768);
+  });
+
+  const catalogModel = getBuiltinModels("anthropic").find((model) => model.contextWindow >= 4 * 8192);
+
+  it("warns once when gateway windows are 4x or more off pi's catalog, naming the models", () => {
+    assert.ok(catalogModel, "pi's anthropic catalog has no model with a window over 32K; drop this case");
+    const { warnings } = modelsFromList(
+      {
+        data: [
+          { id: catalogModel.id, context_window: 8192 },
+          { id: "other-a", context_window: 8192 },
+          { id: "other-b", context_window: 8192 },
+        ],
+      },
+      config(),
+    );
+    assert.equal(warnings.length, 1, warnings.join("\n"));
+    assert.match(warnings[0], new RegExp(`${catalogModel.id} \\(gateway 8192, pi's catalog ${catalogModel.contextWindow}\\)`));
+    assert.match(warnings[0], /3 listed models report the same 8192/);
+    assert.match(warnings[0], /models\[id\]\.contextWindow/);
+  });
+
+  it("is silent when the gateway agrees with the catalog, or a config override sets the window", () => {
+    assert.ok(catalogModel);
+    assert.deepEqual(modelsFromList({ data: [{ id: catalogModel.id, context_window: catalogModel.contextWindow }] }, config()).warnings, []);
+    const overridden = config({ models: { [catalogModel.id]: { contextWindow: 8192 } } });
+    assert.deepEqual(modelsFromList({ data: [{ id: catalogModel.id, context_window: 8192 }] }, overridden).warnings, []);
   });
 });
 
