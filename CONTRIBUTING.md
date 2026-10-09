@@ -193,7 +193,10 @@ pi -ne -e . --no-session -p --model gateway/oss/zai-org/glm-5-3 "say hi"
 
 The mock logs `<method> <path> auth=<header names> model=<id>` per request. Repeat with
 `node scripts/mock-gateway.mjs 47812 --auth basic` and `INFERENCE_GATEWAY_AUTH_HEADER=basic`,
-`INFERENCE_GATEWAY_BASIC_PASSWORD=test-pass` (Praxis's documented setup). Run the same against the
+`INFERENCE_GATEWAY_BASIC_PASSWORD=test-pass` (Praxis's documented setup), and with
+`node scripts/mock-gateway.mjs 47813 --mode agentgateway` and `INFERENCE_GATEWAY_AUTH_HEADER=bearer`
+(Bearer on every path, a synthesised `owned_by: "openai"` list with an `openai/*` wildcard, routing
+by body `model`, text/plain 400/401 errors; see README, "agentgateway"). Run the same against the
 oldest pi in the matrix:
 
 ```bash
