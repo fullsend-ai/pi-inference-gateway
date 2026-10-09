@@ -39,22 +39,29 @@ the suite runs with no network and no credentials.
 ```
 extension factory (awaited by pi before startup)
   loadConfig()            env INFERENCE_GATEWAY_* + ~/.pi/agent/inference-gateway.json
+    bindEnvCredentials()  drop providers using INFERENCE_GATEWAY_* credentials for another URL
+    dropCredentialHeaders() drop static headers named like an auth header
   initialModels()         GET {baseUrl}/v1/models, 5 s, redirect: "error", 1 MiB cap
     parseModelList()      {data:[...]} | {models:[...]} | [...]; sanitise; cap 1000
-    buildModel()          selectApi() + metadata merge; id kept verbatim
+    buildModel()          selectApi() + metadata merge + compat validation; id kept verbatim
     + config-added models (models[id] with an api the list lacks)
-  createProvider({ models, fetchModels, auth.apiKey, api: { anthropic-messages, openai-responses,
-                   openai-completions } })
+  createGatewayProvider()
+    createProvider({ models: [], auth.apiKey, api: { anthropic-messages, openai-responses,
+                     openai-completions } })          auth + stream dispatch only; no fetchModels
+    getModels()           this provider's own list (startup models, then the last refresh)
+    refreshModels(ctx)    offline: restore ctx.stored through rebindModels() (only if startup failed)
+                          online: GET /v1/models, replace the list, persist it without headers
   registerProvider()
 ```
 
 ### Why discovery runs in the factory
 
 pi refreshes dynamic model lists from the network only in interactive and RPC sessions. `pi -p` and
-`pi --list-models` refresh with `allowNetwork: false` (cache only), so a provider that relied on
-`fetchModels` alone would have **no models** in a fresh sandbox running `pi -p`. pi awaits async
-extension factories, so the factory discovers with a short timeout and passes the result as static
-`models`. `fetchModels` is still set, for interactive refreshes and `/gateway-refresh`.
+`pi --list-models` refresh with `allowNetwork: false` (cache only), so a provider that discovered
+models only in a network refresh would have **no models** in a fresh sandbox running `pi -p`. pi
+awaits async extension factories, so the factory discovers with a short timeout and the provider
+starts with that list. Interactive refreshes and `/gateway-refresh` go through the provider's own
+`refreshModels` (below); createProvider gets no `fetchModels`.
 
 createProvider keeps its `models` as an immutable baseline and merges refreshes over it, so it could
 never drop a startup model. `createGatewayProvider()` therefore owns the list: `getModels()` returns

@@ -108,7 +108,7 @@ For several gateways, per-model overrides or models the gateway does not list, a
 | `username` / `usernameEnv`, `passwordEnv` / `passwordFile` | Basic-auth credentials (a literal `password` is refused). |
 | `authHeader` | See [Auth headers](#auth). |
 | `defaultApi` | As `INFERENCE_GATEWAY_DEFAULT_API`. |
-| `headers` | Extra headers on every request, discovery included. |
+| `headers` | Extra headers on every request, discovery included. A header named like an auth header (`authorization`, `x-api-key`, or any header used in `authHeader`) is refused: credentials only come from the configured key, token or password. |
 | `modelsPath` | Model-list path, default `/v1/models`. |
 | `include` / `exclude` | `*` globs over listed model ids. |
 | `models` | Per-id overrides: `api`, `name`, `contextWindow`, `maxTokens`, `reasoning`, `input` (`["text","image"]`), `cost` (USD per million tokens), `compat` (see [Request features (`compat`)](#request-features-compat)). **An entry with an `api` whose id the gateway does not list adds that model.** |
@@ -215,9 +215,11 @@ model:
 
 An object is merged over the inherited flags (set a flag to `false` to turn a feature off); `null`
 drops the inherited flags entirely, so pi falls back to its plain defaults for that transport.
-Values must be booleans, strings or numbers; pi ignores flag names it does not know. pi's
-`allowedFallbackModels` is never inherited: it adds a `fallbacks` body field that only
-api.anthropic.com accepts.
+Values must be booleans, strings or numbers. Flags pi declares for the model's API are checked
+against pi's own types (booleans, numbers, and enums such as `maxTokensField` or `thinkingFormat`);
+a wrong-typed value is dropped with a warning. Flag names pi does not declare pass through
+unchanged. `allowedFallbackModels` is never inherited and cannot be set: pi turns it into a
+`fallbacks` body field that only api.anthropic.com accepts.
 
 ## When the model list changes
 

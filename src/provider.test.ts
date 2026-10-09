@@ -400,7 +400,7 @@ function listFetch(body: unknown): { urls: string[]; fetch: FetchFunction } {
   };
 }
 
-describe("refresh: fetchModels, persisted snapshot", () => {
+describe("refresh: refreshModels, persisted snapshot", () => {
   it("fetches and publishes a new list when the network is allowed", async () => {
     const { urls, fetch } = listFetch({ data: [{ id: "new-model", owned_by: "anthropic" }] });
     const provider = createGatewayProvider(config(), { models: [], fresh: false }, { env: { GW_KEY: "tok" }, fetch });
