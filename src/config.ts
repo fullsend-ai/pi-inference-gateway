@@ -22,8 +22,35 @@ export function isGatewayApi(value: unknown): value is GatewayApi {
 export const DEFAULT_PROVIDER_ID = "gateway";
 export const DEFAULT_API: GatewayApi = "openai-responses";
 export const DEFAULT_MODELS_PATH = "/v1/models";
-export const DEFAULT_AUTH_HEADER = "authorization";
 export const CONFIG_FILE_NAME = "inference-gateway.json";
+
+/** Where a token is sent: one of the three transports, or the model-list request. */
+export type AuthTarget = GatewayApi | "discovery";
+
+export const AUTH_TARGETS: readonly AuthTarget[] = [...GATEWAY_APIS, "discovery"];
+
+function isAuthTarget(value: string): value is AuthTarget {
+  return (AUTH_TARGETS as readonly string[]).includes(value);
+}
+
+/**
+ * The header each request carries the token in when nothing overrides it: whatever the transport
+ * sends natively. pi's Anthropic transport sends `x-api-key`, the OpenAI ones
+ * `authorization: Bearer`, and discovery uses Bearer. A path-routing front proxy that forwards
+ * `/v1/messages` to a Claude backend accepts only `x-api-key` there, so a blanket Bearer default
+ * would 401 every Claude model.
+ */
+export const NATIVE_AUTH_HEADERS: Readonly<Record<AuthTarget, string>> = {
+  "anthropic-messages": "x-api-key",
+  "openai-responses": "authorization",
+  "openai-completions": "authorization",
+  discovery: "authorization",
+};
+
+/** The header a request to `target` carries the token in. `authorization` means `Bearer <token>`. */
+export function authHeaderFor(config: Pick<GatewayConfig, "authHeaders">, target: AuthTarget): string {
+  return config.authHeaders[target] ?? NATIVE_AUTH_HEADERS[target];
+}
 
 /** The environment contract. Unset base URL means the env provider is disabled. */
 export const ENV = {
@@ -32,6 +59,8 @@ export const ENV = {
   tokenFile: "INFERENCE_GATEWAY_TOKEN_FILE",
   providerId: "INFERENCE_GATEWAY_PROVIDER_ID",
   defaultApi: "INFERENCE_GATEWAY_DEFAULT_API",
+  authHeader: "INFERENCE_GATEWAY_AUTH_HEADER",
+  extraModels: "INFERENCE_GATEWAY_EXTRA_MODELS",
 } as const;
 
 /** Per-model overrides from the config file. Every field wins over the gateway and pi's catalog. */
@@ -61,8 +90,11 @@ export interface GatewayConfig {
   apiKeyEnv?: string;
   /** File holding the token, re-read on every request. Wins over `apiKeyEnv`. */
   tokenFile?: string;
-  /** Lower-case header name the token is sent in; `authorization` means `Bearer <token>`. */
-  authHeader: string;
+  /**
+   * Per-target header overrides (lower-case); a missing target uses NATIVE_AUTH_HEADERS.
+   * `authorization` means `Bearer <token>`; any other header carries the raw token.
+   */
+  authHeaders: Partial<Record<AuthTarget, string>>;
   defaultApi: GatewayApi;
   /** Extra static request headers, sent on discovery and on every model request. */
   headers: Record<string, string>;
@@ -70,6 +102,10 @@ export interface GatewayConfig {
   modelsPath: string;
   include: string[];
   exclude: string[];
+  /**
+   * Overrides for discovered models, keyed by id. An entry with an `api` whose id the gateway does
+   * not list is added as an extra model: path-routing proxies serve models they never list.
+   */
   models: Record<string, ModelOverride>;
   /** Raw model entries (same shapes the gateway returns) used when discovery fails. */
   fallbackModels: unknown[];
@@ -203,6 +239,71 @@ function parseHeaders(raw: unknown, where: string, warnings: string[]): Record<s
   return headers;
 }
 
+function headerName(value: unknown): string | undefined {
+  return typeof value === "string" && HEADER_NAME_RE.test(value) ? value.toLowerCase() : undefined;
+}
+
+/**
+ * `authHeader` in the file: one header name for every target, or an object keyed by target
+ * (`anthropic-messages`, `openai-responses`, `openai-completions`, `discovery`).
+ */
+export function parseAuthHeaders(raw: unknown, where: string, warnings: string[]): Partial<Record<AuthTarget, string>> {
+  const overrides: Partial<Record<AuthTarget, string>> = {};
+  if (raw === undefined) return overrides;
+  const single = headerName(raw);
+  if (single !== undefined) {
+    for (const target of AUTH_TARGETS) overrides[target] = single;
+    return overrides;
+  }
+  if (!isRecord(raw)) {
+    warnings.push(`${where}: "authHeader" must be a header name or an object keyed by ${AUTH_TARGETS.join(", ")}; ignored`);
+    return overrides;
+  }
+  for (const [target, value] of Object.entries(raw)) {
+    const name = headerName(value);
+    if (!isAuthTarget(target) || name === undefined) {
+      warnings.push(`${where}: "authHeader.${target}" must be a header name for one of ${AUTH_TARGETS.join(", ")}; ignored`);
+      continue;
+    }
+    overrides[target] = name;
+  }
+  return overrides;
+}
+
+/**
+ * `INFERENCE_GATEWAY_AUTH_HEADER`: a header name for every target (`x-api-key`), or
+ * comma-separated `target=header` pairs (`anthropic-messages=authorization,discovery=x-api-key`).
+ */
+export function parseAuthHeaderEnv(raw: string, warnings: string[]): Partial<Record<AuthTarget, string>> {
+  if (!raw.includes("=")) return parseAuthHeaders(raw, ENV.authHeader, warnings);
+  const pairs: Record<string, string> = {};
+  for (const part of raw.split(",")) {
+    const [target = "", header = ""] = part.split("=").map((piece) => piece.trim());
+    pairs[target] = header;
+  }
+  return parseAuthHeaders(pairs, ENV.authHeader, warnings);
+}
+
+/**
+ * `INFERENCE_GATEWAY_EXTRA_MODELS`: comma-separated `id=api` pairs for models the gateway serves
+ * but does not list (`gpt-6-luna=openai-responses,acme/glm-5-3=openai-completions`).
+ */
+export function parseExtraModelsEnv(raw: string, warnings: string[]): Record<string, ModelOverride> {
+  const models: Record<string, ModelOverride> = {};
+  for (const part of raw.split(",")) {
+    if (!part.trim()) continue;
+    const separator = part.lastIndexOf("=");
+    const id = part.slice(0, Math.max(separator, 0)).trim();
+    const api = part.slice(separator + 1).trim();
+    if (separator <= 0 || !id || /\s/.test(id) || id.length > 256 || hasControlChars(id) || !isGatewayApi(api)) {
+      warnings.push(`${ENV.extraModels}: ${JSON.stringify(part.trim())} must be <model-id>=<${GATEWAY_APIS.join("|")}>; ignored`);
+      continue;
+    }
+    models[id] = { api };
+  }
+  return models;
+}
+
 /** Parse one `providers.<id>` entry. Returns undefined (with a warning) when it cannot be used. */
 export function parseProviderEntry(
   id: string,
@@ -238,7 +339,7 @@ export function parseProviderEntry(
   const config: GatewayConfig = {
     id,
     baseUrl,
-    authHeader: DEFAULT_AUTH_HEADER,
+    authHeaders: parseAuthHeaders(raw.authHeader, where, warnings),
     defaultApi: DEFAULT_API,
     headers: parseHeaders(raw.headers, where, warnings),
     modelsPath: DEFAULT_MODELS_PATH,
@@ -257,13 +358,6 @@ export function parseProviderEntry(
       config.tokenFile = expandHome(raw.tokenFile.trim(), home);
     } else {
       warnings.push(`${where}: "tokenFile" must be a path; ignored`);
-    }
-  }
-  if (raw.authHeader !== undefined) {
-    if (typeof raw.authHeader === "string" && HEADER_NAME_RE.test(raw.authHeader)) {
-      config.authHeader = raw.authHeader.toLowerCase();
-    } else {
-      warnings.push(`${where}: "authHeader" must be a header name; using ${DEFAULT_AUTH_HEADER}`);
     }
   }
   if (raw.defaultApi !== undefined) {
@@ -337,6 +431,11 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
     else warnings.push(`${ENV.defaultApi}: must be one of ${GATEWAY_APIS.join(", ")}; using ${DEFAULT_API}`);
   }
 
+  const rawAuthHeader = env[ENV.authHeader]?.trim();
+  const authHeaders = rawAuthHeader ? parseAuthHeaderEnv(rawAuthHeader, warnings) : {};
+  const rawExtra = env[ENV.extraModels]?.trim();
+  const models = rawExtra ? parseExtraModelsEnv(rawExtra, warnings) : {};
+
   const tokenFile = env[ENV.tokenFile]?.trim();
   return {
     providers: [
@@ -345,13 +444,13 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
         baseUrl,
         apiKeyEnv: ENV.apiKey,
         ...(tokenFile ? { tokenFile: expandHome(tokenFile, home) } : {}),
-        authHeader: DEFAULT_AUTH_HEADER,
+        authHeaders,
         defaultApi,
         headers: {},
         modelsPath: DEFAULT_MODELS_PATH,
         include: [],
         exclude: [],
-        models: {},
+        models,
         fallbackModels: [],
       },
     ],
@@ -362,7 +461,8 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
 /**
  * Combine the env provider with the file's providers. A file entry with the env provider's id is
  * merged: the environment supplies the connection (base URL, credentials, default API) and the file
- * keeps everything else (headers, filters, per-model overrides, fallback models).
+ * keeps everything else (headers, filters, fallback models). Auth-header overrides and models are
+ * merged per key; for a model both name, the file's fields win over the env's bare `id=api`.
  */
 export function mergeProviders(fromEnv: GatewayConfig[], fromFile: GatewayConfig[]): GatewayConfig[] {
   const merged = new Map<string, GatewayConfig>();
@@ -379,6 +479,13 @@ export function mergeProviders(fromEnv: GatewayConfig[], fromFile: GatewayConfig
       apiKeyEnv: provider.apiKeyEnv,
       tokenFile: provider.tokenFile ?? file.tokenFile,
       defaultApi: provider.defaultApi === DEFAULT_API ? file.defaultApi : provider.defaultApi,
+      authHeaders: { ...file.authHeaders, ...provider.authHeaders },
+      models: Object.fromEntries(
+        [...new Set([...Object.keys(provider.models), ...Object.keys(file.models)])].map((modelId) => [
+          modelId,
+          { ...provider.models[modelId], ...file.models[modelId] },
+        ]),
+      ),
     });
   }
   return [...merged.values()];

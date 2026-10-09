@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
+import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import type { FetchFunction } from "@earendil-works/pi-ai";
 import type { GatewayConfig } from "./config.ts";
 import {
@@ -8,6 +8,7 @@ import {
   LIMITS,
   baseUrlFor,
   buildModel,
+  catalogCandidates,
   discoverModels,
   discoveryHeaders,
   fallbackModels,
@@ -19,6 +20,7 @@ import {
   parseModelEntry,
   parseModelList,
   selectApi,
+  separatorVariants,
   stripVendorPrefix,
 } from "./discovery.ts";
 
@@ -27,7 +29,7 @@ function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     id: "gateway",
     baseUrl: "https://gw.example.com",
     apiKeyEnv: "INFERENCE_GATEWAY_API_KEY",
-    authHeader: "authorization",
+    authHeaders: {},
     defaultApi: "openai-responses",
     headers: {},
     modelsPath: "/v1/models",
@@ -353,7 +355,7 @@ describe("selectApi precedence", () => {
       assert.equal(selectApi(entry({ owned_by: owner }), config({ defaultApi: "openai-completions" })), "anthropic-messages", owner);
     }
     assert.equal(selectApi(entry({ litellm_provider: "anthropic" }), config({ defaultApi: "openai-completions" })), "anthropic-messages");
-    for (const owner of ["openai", "azure", "openai-internal", "azure_ai"]) {
+    for (const owner of ["openai", "azure", "openai-internal"]) {
       assert.equal(selectApi(entry({ provider: owner }), config({ defaultApi: "openai-completions" })), "openai-responses", owner);
     }
   });
@@ -378,6 +380,60 @@ describe("selectApi precedence", () => {
     }
   });
 
+  it("3. ambiguous owners (hosts, aggregators, placeholders) are no signal", () => {
+    const cfg = config({ defaultApi: "openai-completions" });
+    for (const owner of ["vertex", "bedrock", "azure_ai", "openrouter", "system", "library", ""]) {
+      assert.equal(selectApi(entry({ owned_by: owner }), cfg), "openai-completions", JSON.stringify(owner));
+    }
+    // ...so a Claude id the proxy reports as owned_by "vertex" still reaches the catalog rule.
+    const claude = parseModelEntry({ id: ANTHROPIC_ID, owned_by: "vertex" });
+    assert.ok(claude);
+    assert.equal(selectApi(claude, cfg), "anthropic-messages");
+  });
+
+  it("5. a claude- id unknown to pi's anthropic catalog → messages, also after a vendor prefix", () => {
+    const cfg = config({ defaultApi: "openai-completions" });
+    for (const id of ["claude-future-9", "anthropic/claude-future-9", "a/b/claude-future-9"]) {
+      const parsed = parseModelEntry({ id, owned_by: "vertex" });
+      assert.ok(parsed);
+      assert.equal(selectApi(parsed, cfg), "anthropic-messages", id);
+    }
+  });
+
+  it("5 before 6: a Claude id only in an aggregator catalog still → messages", () => {
+    // Aggregators (github-copilot, opencode, ...) list Claude ids with dotted versions that pi's
+    // anthropic catalog spells differently; rule 6 would send these to chat completions.
+    const aggregatorOnly = getBuiltinProviders()
+      .flatMap((provider) => getBuiltinModels(provider).map((model) => model.id))
+      .find((id) => stripVendorPrefix(id).startsWith("claude-") && findCatalogModel(id)?.source !== "anthropic");
+    assert.ok(aggregatorOnly, "pi's catalog no longer lists a Claude id outside `anthropic`; drop this case");
+    const parsed = parseModelEntry({ id: aggregatorOnly, owned_by: "vertex" });
+    assert.ok(parsed);
+    assert.equal(selectApi(parsed, config({ defaultApi: "openai-responses" })), "anthropic-messages");
+  });
+
+  it("6. pi catalog under any other provider → chat completions, never a native API", () => {
+    const gemini = getBuiltinModels("google")[0];
+    assert.equal(gemini.api, "google-generative-ai", "control: pi's own transport for it is native");
+    const parsed = parseModelEntry({ id: gemini.id, owned_by: "vertex" });
+    assert.ok(parsed);
+    assert.equal(selectApi(parsed, config()), "openai-completions");
+  });
+
+  it("6. a vendor/org/model id with a dashed version matches the catalog's dotted one", () => {
+    const parsed = parseModelEntry({ id: "oss/zai-org/glm-5-3" });
+    assert.ok(parsed);
+    const match = findCatalogModel(parsed.id);
+    assert.ok(match, "glm-5-3 should match pi's glm-5.3");
+    assert.equal(match.model.id, "glm-5.3");
+    assert.equal(match.source, "zai");
+    assert.equal(selectApi(parsed, config()), "openai-completions");
+    const model = buildModel(parsed, config());
+    assert.equal(model.id, "oss/zai-org/glm-5-3", "the request id stays verbatim");
+    assert.equal(model.contextWindow, match.model.contextWindow);
+    assert.equal(model.reasoning, match.model.reasoning);
+  });
+
   it("5. defaultApi when nothing else matches", () => {
     assert.equal(selectApi(entry({ owned_by: "someone" }), config({ defaultApi: "openai-completions" })), "openai-completions");
     assert.equal(selectApi(entry({}), config()), "openai-responses");
@@ -389,6 +445,24 @@ describe("baseUrlFor", () => {
     assert.equal(baseUrlFor("anthropic-messages", "https://gw.example.com/p"), "https://gw.example.com/p");
     assert.equal(baseUrlFor("openai-responses", "https://gw.example.com/p"), "https://gw.example.com/p/v1");
     assert.equal(baseUrlFor("openai-completions", "https://gw.example.com"), "https://gw.example.com/v1");
+  });
+});
+
+describe("separatorVariants / catalogCandidates", () => {
+  it("swaps - and . only between digits", () => {
+    assert.deepEqual(separatorVariants("glm-5-3"), ["glm-5-3", "glm-5.3"]);
+    assert.deepEqual(separatorVariants("glm-5.3"), ["glm-5.3", "glm-5-3"]);
+    assert.deepEqual(separatorVariants("gpt-4o"), ["gpt-4o"]);
+    assert.deepEqual(separatorVariants("claude-haiku-4-5"), ["claude-haiku-4-5", "claude-haiku-4.5"]);
+  });
+
+  it("tries the exact id (and its variants), then without the vendor prefix", () => {
+    assert.deepEqual(catalogCandidates("oss/zai-org/glm-5-3"), ["oss/zai-org/glm-5-3", "oss/zai-org/glm-5.3", "glm-5-3", "glm-5.3"]);
+  });
+
+  it("prefers an anthropic/openai hit over any other provider's", () => {
+    assert.equal(findCatalogModel(ANTHROPIC_ID)?.source, "anthropic");
+    assert.equal(findCatalogModel(OPENAI_ID)?.source, "openai");
   });
 });
 
@@ -553,7 +627,7 @@ describe("discoverModels", () => {
 
   it("uses the configured auth header and models path", async () => {
     const { calls, fetch } = stubFetch(() => json([]));
-    await discoverModels(config({ authHeader: "x-api-key", modelsPath: "/models" }), { token: "tok", fetch });
+    await discoverModels(config({ authHeaders: { discovery: "x-api-key" }, modelsPath: "/models" }), { token: "tok", fetch });
     assert.equal(calls[0].url, "https://gw.example.com/models");
     const headers = new Headers(calls[0].init?.headers);
     assert.equal(headers.get("x-api-key"), "tok");
@@ -561,7 +635,13 @@ describe("discoverModels", () => {
   });
 
   it("sends no auth header without a token", () => {
-    assert.deepEqual(discoveryHeaders({ headers: {}, authHeader: "authorization" }, undefined), {});
+    assert.deepEqual(discoveryHeaders({ headers: {}, authHeaders: {} }, undefined), {});
+  });
+
+  it("uses Bearer by default even when a transport overrides its header", () => {
+    assert.deepEqual(discoveryHeaders({ headers: {}, authHeaders: { "anthropic-messages": "authorization", "openai-responses": "x-api-key" } }, "t"), {
+      authorization: "Bearer t",
+    });
   });
 });
 
@@ -576,5 +656,55 @@ describe("fallbackModels", () => {
       ],
     );
     assert.deepEqual(fallbackModels(config()), []);
+  });
+
+  it("includes config-added models, so a dead gateway still offers them", () => {
+    const models = fallbackModels(config({ models: { "gpt-6-luna": { api: "openai-responses" } } }));
+    assert.deepEqual(
+      models.map((model) => [model.id, model.api]),
+      [["gpt-6-luna", "openai-responses"]],
+    );
+  });
+});
+
+describe("config-added models", () => {
+  it("adds unlisted models that have an api, ignoring include/exclude", () => {
+    const cfg = config({
+      exclude: ["gpt-*"],
+      models: {
+        "gpt-6-luna": { api: "openai-responses" },
+        "oss/zai-org/glm-5-3": { api: "anthropic-messages" },
+        "no-api": { contextWindow: 5 },
+      },
+    });
+    const { models } = modelsFromList({ data: [{ id: "claude-sonnet-x", owned_by: "vertex" }] }, cfg);
+    assert.deepEqual(
+      models.map((model) => [model.id, model.api, model.baseUrl]),
+      [
+        ["claude-sonnet-x", "anthropic-messages", "https://gw.example.com"],
+        ["gpt-6-luna", "openai-responses", "https://gw.example.com/v1"],
+        ["oss/zai-org/glm-5-3", "anthropic-messages", "https://gw.example.com"],
+      ],
+    );
+  });
+
+  it("takes metadata from the override, then the catalog, then defaults", () => {
+    const luna = getBuiltinModels("openai").find((model) => model.id === OPENAI_ID);
+    assert.ok(luna);
+    const { models } = modelsFromList([], config({
+      models: { [OPENAI_ID]: { api: "openai-responses", maxTokens: 77 }, "mystery-1": { api: "openai-completions" } },
+    }));
+    const [fromCatalog, unknown] = models;
+    assert.equal(fromCatalog.maxTokens, 77);
+    assert.equal(fromCatalog.contextWindow, luna.contextWindow);
+    assert.equal(unknown.contextWindow, DEFAULTS.contextWindow);
+  });
+
+  it("only overrides a model the gateway does list", () => {
+    const { models } = modelsFromList({ data: [{ id: "m", owned_by: "openai" }] }, config({ models: { m: { api: "openai-completions" } } }));
+    assert.deepEqual(
+      models.map((model) => [model.id, model.api]),
+      [["m", "openai-completions"]],
+    );
   });
 });

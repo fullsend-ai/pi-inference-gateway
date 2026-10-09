@@ -37,13 +37,14 @@ export interface RuntimeDeps {
 // --- auth header ------------------------------------------------------------------------------
 
 /**
- * A `fetch` that puts the token in exactly one header: `authorization: Bearer <token>` (the
- * default) or the raw token in a custom header such as `x-api-key`.
+ * A `fetch` that puts the token in exactly one header: `authorization: Bearer <token>`, or the raw
+ * token in any other header such as `x-api-key`.
  *
- * Needed because the transports disagree: pi's Anthropic transport sends the key as `x-api-key`,
- * the OpenAI ones as `authorization: Bearer`. A Bearer-only gateway would otherwise 401 every Claude
- * model while GPT works. Applied to all three transports so the configured header is the only one
- * that ever leaves, whichever SDK built the request.
+ * Only used when the config overrides a transport's header. pi's Anthropic transport sends
+ * `x-api-key` and the OpenAI ones `authorization: Bearer`; gateways differ in which they accept per
+ * path (a Bearer-only gateway 401s Claude by default; a path-routing proxy in front of a Claude
+ * backend 401s Bearer on /v1/messages). The rewrite removes both and sets the configured one, so
+ * exactly one auth header leaves, whichever SDK built the request.
  *
  * `baseFetch` is resolved per call, not captured: `globalThis.fetch` is routinely replaced after
  * module load (proxy agents, test doubles, pi's own instrumentation).
@@ -97,12 +98,20 @@ export function withAuthHeader(base: ProviderStreams, authHeader: string): Provi
   return wrapped;
 }
 
-/** The `api` map: pi dispatches each model to the entry keyed by its `model.api`. */
-export function gatewayStreams(authHeader: string): Record<GatewayApi, ProviderStreams> {
+/**
+ * The `api` map: pi dispatches each model to the entry keyed by its `model.api`. Each transport
+ * keeps its native auth header (`x-api-key` for Messages, Bearer for the OpenAI ones) unless the
+ * config overrides that transport's header, and only then is it wrapped.
+ */
+export function gatewayStreams(config: Pick<GatewayConfig, "authHeaders">): Record<GatewayApi, ProviderStreams> {
+  const transport = (api: GatewayApi, base: ProviderStreams) => {
+    const override = config.authHeaders[api];
+    return override === undefined ? base : withAuthHeader(base, override);
+  };
   return {
-    "anthropic-messages": withAuthHeader(anthropicMessagesApi(), authHeader),
-    "openai-responses": withAuthHeader(openAIResponsesApi(), authHeader),
-    "openai-completions": withAuthHeader(openAICompletionsApi(), authHeader),
+    "anthropic-messages": transport("anthropic-messages", anthropicMessagesApi()),
+    "openai-responses": transport("openai-responses", openAIResponsesApi()),
+    "openai-completions": transport("openai-completions", openAICompletionsApi()),
   };
 }
 
@@ -152,7 +161,7 @@ export function gatewayProviderOptions(
         signal: context.signal,
         ...(deps.fetch ? { fetch: deps.fetch } : {}),
       }),
-    api: gatewayStreams(config.authHeader),
+    api: gatewayStreams(config),
   };
 }
 

@@ -4,7 +4,7 @@
 // I/O is the injected `fetch`.
 
 import { hasApi } from "@earendil-works/pi-ai";
-import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
+import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import type {
   AnthropicMessagesCompat,
   Api,
@@ -15,7 +15,7 @@ import type {
   OpenAIResponsesCompat,
   ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import { hasControlChars, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
+import { authHeaderFor, hasControlChars, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
 
 export const LIMITS = {
   maxIdLength: 256,
@@ -291,12 +291,30 @@ export function stripVendorPrefix(id: string): string {
   return slash >= 0 ? id.slice(slash + 1) : id;
 }
 
+/**
+ * Owner values that say who *hosts* a model, not which protocol it speaks: a cloud
+ * (`vertex`, `bedrock`, `azure_ai`), an aggregator (`openrouter`), or a placeholder (`system`,
+ * `library`, empty). A path-routing front proxy reports `owned_by: "vertex"` for Claude and Gemini
+ * alike, so these are no signal and the next rule decides.
+ */
+export const AMBIGUOUS_OWNERS: ReadonlySet<string> = new Set([
+  "",
+  "vertex",
+  "vertex_ai",
+  "bedrock",
+  "bedrock_converse",
+  "azure_ai",
+  "openrouter",
+  "system",
+  "library",
+]);
+
 function isAnthropicOwner(owner: string): boolean {
-  return owner.includes("anthropic");
+  return !AMBIGUOUS_OWNERS.has(owner) && owner.includes("anthropic");
 }
 
 function isOpenAIOwner(owner: string): boolean {
-  return owner === "openai" || owner.startsWith("openai-") || owner === "azure" || owner.startsWith("azure_") || owner.startsWith("azure-");
+  return !AMBIGUOUS_OWNERS.has(owner) && (owner === "openai" || owner.startsWith("openai-") || owner === "azure");
 }
 
 function apiFromEndpoints(endpoints: readonly string[], anthropicOwned: boolean): GatewayApi | undefined {
@@ -311,22 +329,87 @@ function apiFromEndpoints(endpoints: readonly string[], anthropicOwned: boolean)
   return undefined;
 }
 
-/** A pi built-in model with this id (or the id after its vendor prefix), if any. */
+/** A pi built-in model matching a gateway id, and the built-in provider it was found under. */
 export interface CatalogMatch {
-  /** Which built-in provider it came from. */
-  source: "anthropic" | "openai";
+  /** pi's built-in provider id: `anthropic`, `openai`, `zai`, `google`, ... */
+  source: string;
   model: Model<Api>;
 }
 
-export function findCatalogModel(id: string): CatalogMatch | undefined {
-  const candidates = id.includes("/") ? [id, stripVendorPrefix(id)] : [id];
-  for (const candidate of candidates) {
-    const anthropic = getBuiltinModels("anthropic").find((model) => model.id === candidate);
-    if (anthropic) return { source: "anthropic", model: anthropic };
-    const openai = getBuiltinModels("openai").find((model) => model.id === candidate);
-    if (openai) return { source: "openai", model: openai };
+/**
+ * The order built-in providers are searched in. `anthropic` and `openai` first (they decide the
+ * transport), then first-party vendors, then everything else — aggregators such as `openrouter` or
+ * `github-copilot` re-list other vendors' models and are only a last resort for metadata.
+ */
+const CATALOG_PRIORITY = [
+  "anthropic",
+  "openai",
+  "google",
+  "xai",
+  "zai",
+  "zai-coding-cn",
+  "deepseek",
+  "mistral",
+  "moonshotai",
+  "minimax",
+  "meta",
+  "xiaomi",
+  "qwen-token-plan",
+];
+
+let catalogIndex: Map<string, CatalogMatch> | undefined;
+
+/** id → first match in CATALOG_PRIORITY order, built once. */
+function catalog(): Map<string, CatalogMatch> {
+  if (catalogIndex) return catalogIndex;
+  const rank = (provider: string) => {
+    const index = CATALOG_PRIORITY.indexOf(provider);
+    return index >= 0 ? index : CATALOG_PRIORITY.length;
+  };
+  const providers = [...getBuiltinProviders()].sort((a, b) => rank(a) - rank(b));
+  const index = new Map<string, CatalogMatch>();
+  for (const source of providers) {
+    for (const model of getBuiltinModels(source)) {
+      if (!index.has(model.id)) index.set(model.id, { source, model });
+    }
   }
-  return undefined;
+  catalogIndex = index;
+  return index;
+}
+
+/** `glm-5-3` ↔ `glm-5.3`: gateways and pi's catalog disagree on version separators. */
+export function separatorVariants(id: string): string[] {
+  const dotted = id.replace(/(\d)-(?=\d)/g, "$1.");
+  const dashed = id.replace(/(\d)\.(?=\d)/g, "$1-");
+  return [...new Set([id, dotted, dashed])];
+}
+
+/** The ids tried against pi's catalog, most specific first. Requests always use the original. */
+export function catalogCandidates(id: string): string[] {
+  const stripped = stripVendorPrefix(id);
+  const bases = stripped === id ? [id] : [id, stripped];
+  return [...new Set(bases.flatMap(separatorVariants))];
+}
+
+/**
+ * A pi built-in model for this id: exact id first, then without its `vendor/` prefix, then with
+ * `-`/`.` swapped between digits — `anthropic`/`openai` hits win over any other provider's.
+ */
+export function findCatalogModel(id: string): CatalogMatch | undefined {
+  const index = catalog();
+  const candidates = catalogCandidates(id);
+  let fallback: CatalogMatch | undefined;
+  for (const candidate of candidates) {
+    const match = index.get(candidate);
+    if (!match) continue;
+    if (match.source === "anthropic" || match.source === "openai") return match;
+    fallback ??= match;
+  }
+  return fallback;
+}
+
+function isClaudeId(id: string): boolean {
+  return id.startsWith("claude-") || stripVendorPrefix(id).startsWith("claude-");
 }
 
 /**
@@ -334,14 +417,20 @@ export function findCatalogModel(id: string): CatalogMatch | undefined {
  *   1. config `models[id].api`
  *   2. gateway hint: `api`, then `endpoint`/`inference_endpoint`/`supported_endpoints`/`endpoints`
  *      (messages for Anthropic owners, else responses, else chat)
- *   3. owner: anthropic → messages; openai/azure → responses
- *   4. pi's built-in catalog: found under `anthropic` → messages, under `openai` → responses
- *   5. the provider's `defaultApi`
+ *   3. owner: anthropic → messages; openai/azure → responses; AMBIGUOUS_OWNERS say nothing
+ *   4. pi's built-in catalog under `anthropic` → messages, under `openai` → responses
+ *   5. a `claude-` id (also after a `vendor/` prefix) → messages
+ *   6. pi's built-in catalog under any other provider → chat completions (never a native API such
+ *      as google-generative-ai: a gateway speaks the three OpenAI/Anthropic protocols only)
+ *   7. the provider's `defaultApi`
+ *
+ * 5 runs before 6 because aggregator catalogs (github-copilot, opencode, openrouter, ...) list
+ * Claude ids too; a Claude id missing from pi's `anthropic` catalog must still go to /v1/messages.
  */
 export function selectApi(
   entry: GatewayModelEntry,
   config: Pick<GatewayConfig, "models" | "defaultApi">,
-  catalog: CatalogMatch | undefined = findCatalogModel(entry.id),
+  match: CatalogMatch | undefined = findCatalogModel(entry.id),
 ): GatewayApi {
   const override = config.models[entry.id]?.api;
   if (override) return override;
@@ -354,8 +443,10 @@ export function selectApi(
   if (anthropicOwned) return "anthropic-messages";
   if (entry.owners.some(isOpenAIOwner)) return "openai-responses";
 
-  if (catalog?.source === "anthropic") return "anthropic-messages";
-  if (catalog?.source === "openai") return "openai-responses";
+  if (match?.source === "anthropic") return "anthropic-messages";
+  if (match?.source === "openai") return "openai-responses";
+  if (isClaudeId(entry.id)) return "anthropic-messages";
+  if (match) return "openai-completions";
 
   return config.defaultApi;
 }
@@ -469,17 +560,31 @@ export function buildModel(entry: GatewayModelEntry, config: GatewayConfig): Gat
   return withApi(api, core, catalog);
 }
 
-/** Parse, filter and build. Throws only on an unusable body shape. */
+/**
+ * Config `models` entries with an `api` that the list does not contain: models a gateway serves but
+ * does not list (a path-routing proxy lists only what one backend reports). Added regardless of
+ * include/exclude, since they were named explicitly; metadata comes from the override, then pi's
+ * catalog, then defaults.
+ */
+export function extraModels(config: GatewayConfig, listedIds: ReadonlySet<string>): GatewayModel[] {
+  return Object.entries(config.models)
+    .filter(([id, override]) => override.api !== undefined && !listedIds.has(id))
+    .map(([id]) => buildModel({ id, endpoints: [], owners: [] }, config));
+}
+
+/** Parse, filter, build, and append config-added models. Throws only on an unusable body shape. */
 export function modelsFromList(body: unknown, config: GatewayConfig): { models: GatewayModel[]; dropped: number } {
   const { entries, dropped } = parseModelList(body);
-  const models = entries.filter((entry) => isIncluded(entry.id, config)).map((entry) => buildModel(entry, config));
-  return { models, dropped };
+  const listed = entries.filter((entry) => isIncluded(entry.id, config)).map((entry) => buildModel(entry, config));
+  const listedIds = new Set(entries.map((entry) => entry.id));
+  return { models: [...listed, ...extraModels(config, listedIds)], dropped };
 }
 
 /** The request headers for discovery: static config headers plus the token in the configured header. */
-export function discoveryHeaders(config: Pick<GatewayConfig, "headers" | "authHeader">, token: string | undefined): Record<string, string> {
+export function discoveryHeaders(config: Pick<GatewayConfig, "headers" | "authHeaders">, token: string | undefined): Record<string, string> {
   const headers: Record<string, string> = { ...config.headers };
-  if (token) headers[config.authHeader] = config.authHeader === "authorization" ? `Bearer ${token}` : token;
+  const name = authHeaderFor(config, "discovery");
+  if (token) headers[name] = name === "authorization" ? `Bearer ${token}` : token;
   return headers;
 }
 
@@ -506,8 +611,7 @@ export async function discoverModels(config: GatewayConfig, options: DiscoverOpt
   return modelsFromList(body, config).models;
 }
 
-/** Models from the config's `fallbackModels` (same entry shapes as the gateway list). */
+/** Models from the config's `fallbackModels` (same entry shapes as the gateway list), plus config-added models. */
 export function fallbackModels(config: GatewayConfig): GatewayModel[] {
-  if (config.fallbackModels.length === 0) return [];
   return modelsFromList(config.fallbackModels, config).models;
 }

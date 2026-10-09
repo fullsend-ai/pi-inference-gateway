@@ -4,7 +4,7 @@ import { createProvider, normalizeContext } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/compat";
 import type { Context, FetchFunction, Model, ModelsPublication, Provider, RefreshModelsContext } from "@earendil-works/pi-ai";
 import type { GatewayApi, GatewayConfig } from "./config.ts";
-import { parseModelEntry, buildModel, type GatewayModel } from "./discovery.ts";
+import { parseModelEntry, buildModel, extraModels, type GatewayModel } from "./discovery.ts";
 import {
   createAuthHeaderFetch,
   createGatewayProvider,
@@ -21,7 +21,7 @@ function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     id: "gateway",
     baseUrl: "https://gw.example.com",
     apiKeyEnv: "GW_KEY",
-    authHeader: "authorization",
+    authHeaders: {},
     defaultApi: "openai-responses",
     headers: {},
     modelsPath: "/v1/models",
@@ -54,14 +54,14 @@ interface RecordedRequest {
 }
 
 /** A fetch that records each request and answers with the canned SSE for its path. */
-function recorder(): { calls: RecordedRequest[]; fetch: FetchFunction } {
+function recorder(reasoning?: string): { calls: RecordedRequest[]; fetch: FetchFunction } {
   const calls: RecordedRequest[] = [];
   const fetch: FetchFunction = async (input, init) => {
     const request = new Request(input, init);
     const text = await request.text();
     const body: Record<string, unknown> = text ? JSON.parse(text) : {};
     calls.push({ url: new URL(request.url), method: request.method, headers: new Headers(request.headers), body });
-    const sse = sseFor(new URL(request.url).pathname, String(body.model), "ok");
+    const sse = sseFor(new URL(request.url).pathname, String(body.model), "ok", reasoning);
     // A fresh Response per call: pi retries through its own retry loop, and a consumed body fails
     // in a way that looks nothing like its cause.
     return sse === undefined
@@ -156,11 +156,32 @@ describe("createProvider integration", () => {
   });
 });
 
+const PATHS: Record<GatewayApi, string> = {
+  "anthropic-messages": "/v1/messages",
+  "openai-responses": "/v1/responses",
+  "openai-completions": "/v1/chat/completions",
+};
+const NATIVE: Record<GatewayApi, "x-api-key" | "authorization"> = {
+  "anthropic-messages": "x-api-key",
+  "openai-responses": "authorization",
+  "openai-completions": "authorization",
+};
+
+function assertOneAuthHeader(headers: Headers, name: "x-api-key" | "authorization"): void {
+  if (name === "authorization") {
+    assert.equal(headers.get("authorization"), "Bearer tok");
+    assert.equal(headers.has("x-api-key"), false, "exactly one auth header");
+  } else {
+    assert.equal(headers.get("x-api-key"), "tok");
+    assert.equal(headers.has("authorization"), false, "exactly one auth header");
+  }
+}
+
 describe("end to end through pi's transports", () => {
   for (const [id, api] of MODELS) {
-    const path = { "anthropic-messages": "/v1/messages", "openai-responses": "/v1/responses", "openai-completions": "/v1/chat/completions" }[api];
+    const path = PATHS[api];
 
-    it(`${api}: POSTs ${path} with a Bearer token and the gateway's id verbatim`, async () => {
+    it(`${api}: POSTs ${path} with its native ${NATIVE[api]} header and the gateway's id verbatim`, async () => {
       const { calls, fetch } = recorder();
       const provider = gatewayProvider();
       const message = await provider.streamSimple(providerModel(provider, id), CONTEXT, { apiKey: "tok", fetch }).result();
@@ -175,21 +196,32 @@ describe("end to end through pi's transports", () => {
       assert.equal(call.method, "POST");
       assert.equal(call.url.origin, "https://gw.example.com");
       assert.equal(call.url.pathname, path);
-      assert.equal(call.headers.get("authorization"), "Bearer tok");
-      assert.equal(call.headers.has("x-api-key"), false, "exactly one auth header");
+      assertOneAuthHeader(call.headers, NATIVE[api]);
       assert.equal(call.body.model, id);
     });
 
-    it(`${api}: sends the token raw in a custom header when configured`, async () => {
-      const { calls, fetch } = recorder();
-      const provider = gatewayProvider(config({ authHeader: "x-api-key" }));
-      const message = await provider.streamSimple(providerModel(provider, id), CONTEXT, { apiKey: "tok", fetch }).result();
-      assert.equal(message.stopReason, "stop", `stream failed: ${message.errorMessage ?? "no reason given"}`);
-      assert.equal(calls[0].url.pathname, path);
-      assert.equal(calls[0].headers.get("x-api-key"), "tok");
-      assert.equal(calls[0].headers.has("authorization"), false, "exactly one auth header");
-    });
+    for (const header of ["x-api-key", "authorization"] as const) {
+      it(`${api}: an authHeader override of ${header} for every API is honoured`, async () => {
+        const { calls, fetch } = recorder();
+        const all = { "anthropic-messages": header, "openai-responses": header, "openai-completions": header };
+        const provider = gatewayProvider(config({ authHeaders: all }));
+        const message = await provider.streamSimple(providerModel(provider, id), CONTEXT, { apiKey: "tok", fetch }).result();
+        assert.equal(message.stopReason, "stop", `stream failed: ${message.errorMessage ?? "no reason given"}`);
+        assert.equal(calls[0].url.pathname, path);
+        assertOneAuthHeader(calls[0].headers, header);
+      });
+    }
   }
+
+  it("a per-API override changes only that API", async () => {
+    const provider = gatewayProvider(config({ authHeaders: { "anthropic-messages": "authorization" } }));
+    const claude = recorder();
+    await provider.streamSimple(providerModel(provider, "test-claude"), CONTEXT, { apiKey: "tok", fetch: claude.fetch }).result();
+    assertOneAuthHeader(claude.calls[0].headers, "authorization");
+    const gpt = recorder();
+    await provider.streamSimple(providerModel(provider, "test-gpt"), CONTEXT, { apiKey: "tok", fetch: gpt.fetch }).result();
+    assertOneAuthHeader(gpt.calls[0].headers, "authorization");
+  });
 
   it("sends static config headers on model requests", async () => {
     const { calls, fetch } = recorder();
@@ -198,14 +230,39 @@ describe("end to end through pi's transports", () => {
     assert.equal(calls[0].headers.get("x-team"), "docs");
   });
 
-  it("is the auth-header wrapper, and nothing else, that changes the Anthropic header", async () => {
-    // Control: pi's bare Anthropic transport sends the key as x-api-key, which a Bearer-only gateway
-    // answers with 401 — the reason the wrapper exists.
+  it("control: pi's bare Anthropic transport sends x-api-key, which is why it needs no wrapper by default", async () => {
     const { calls, fetch } = recorder();
     await anthropicMessagesApi().streamSimple(model("test-claude", "anthropic-messages"), CONTEXT, { apiKey: "tok", fetch }).result();
-    assert.equal(calls[0].headers.get("x-api-key"), "tok");
-    assert.equal(calls[0].headers.has("authorization"), false);
+    assertOneAuthHeader(calls[0].headers, "x-api-key");
   });
+});
+
+describe("one open-weight model routed through every API, with reasoning", () => {
+  // The same unlisted id on all three paths, as a path-routed gateway serves it. The canned
+  // reasoning arrives as Messages `thinking`, Responses `reasoning_text.*` and Chat Completions
+  // `reasoning_content`; each must come back as a pi thinking block before the answer.
+  const GLM = "oss/zai-org/glm-5-3";
+  for (const api of ["anthropic-messages", "openai-responses", "openai-completions"] as const) {
+    it(`${api}: keeps the reasoning as a thinking block and the id verbatim`, async () => {
+      const cfg = config({ models: { [GLM]: { api } } });
+      const provider = createProvider(gatewayProviderOptions(cfg, extraModels(cfg, new Set()), { env: { GW_KEY: "tok" } }));
+      const glm = providerModel(provider, GLM);
+      assert.equal(glm.api, api);
+      const { calls, fetch } = recorder("thinking it over");
+      const message = await provider.streamSimple(glm, CONTEXT, { apiKey: "tok", fetch }).result();
+      assert.equal(message.stopReason, "stop", `stream failed: ${message.errorMessage ?? "no reason given"}`);
+      assert.deepEqual(
+        message.content.map((block) => block.type),
+        ["thinking", "text"],
+      );
+      const [thinking, text] = message.content;
+      assert.ok(thinking.type === "thinking" && thinking.thinking.trim() === "thinking it over", JSON.stringify(thinking));
+      assert.ok(text.type === "text" && text.text === "ok");
+      assert.equal(calls[0].url.pathname, PATHS[api]);
+      assert.equal(calls[0].body.model, GLM);
+      assertOneAuthHeader(calls[0].headers, NATIVE[api]);
+    });
+  }
 });
 
 describe("gatewayAuth", () => {

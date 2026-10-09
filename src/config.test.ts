@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import {
   CONFIG_FILE_NAME,
   agentDir,
+  authHeaderFor,
+  parseAuthHeaderEnv,
+  parseAuthHeaders,
+  parseExtraModelsEnv,
   envProvider,
   expandHome,
   loadConfig,
@@ -74,7 +78,7 @@ describe("envProvider", () => {
     assert.equal(provider.baseUrl, "https://gw.example.com");
     assert.equal(provider.apiKeyEnv, "INFERENCE_GATEWAY_API_KEY");
     assert.equal(provider.tokenFile, undefined);
-    assert.equal(provider.authHeader, "authorization");
+    assert.deepEqual(provider.authHeaders, {}, "every transport keeps its native header");
     assert.equal(provider.defaultApi, "openai-responses");
     assert.equal(provider.modelsPath, "/v1/models");
     assert.equal(JSON.stringify(provider).includes('"k"'), false, "the key value must not be copied");
@@ -144,7 +148,12 @@ describe("parseConfigFile", () => {
     const [provider] = providers;
     assert.equal(provider.baseUrl, "https://gw.example.com");
     assert.equal(provider.apiKeyEnv, "GW_KEY");
-    assert.equal(provider.authHeader, "x-api-key");
+    assert.deepEqual(provider.authHeaders, {
+      "anthropic-messages": "x-api-key",
+      "openai-responses": "x-api-key",
+      "openai-completions": "x-api-key",
+      discovery: "x-api-key",
+    });
     assert.equal(provider.defaultApi, "openai-completions");
     assert.deepEqual(provider.headers, { "x-team": "docs" });
     assert.equal(provider.modelsPath, "/models");
@@ -226,7 +235,7 @@ describe("parseConfigFile", () => {
     );
     const [provider] = providers;
     assert.equal(provider.apiKeyEnv, undefined);
-    assert.equal(provider.authHeader, "authorization");
+    assert.deepEqual(provider.authHeaders, {}, "every transport keeps its native header");
     assert.equal(provider.defaultApi, "openai-responses");
     assert.equal(provider.modelsPath, "/v1/models");
     assert.deepEqual(provider.include, []);
@@ -239,6 +248,75 @@ describe("parseConfigFile", () => {
   it("rejects a file without a providers object", () => {
     assert.equal(parseConfigFile([], HOME).providers.length, 0);
     assert.equal(parseConfigFile({ gateway: {} }, HOME).warnings.length, 1);
+  });
+});
+
+describe("auth header overrides", () => {
+  it("native defaults: x-api-key for Messages, Bearer for the OpenAI transports and discovery", () => {
+    const none = { authHeaders: {} };
+    assert.equal(authHeaderFor(none, "anthropic-messages"), "x-api-key");
+    assert.equal(authHeaderFor(none, "openai-responses"), "authorization");
+    assert.equal(authHeaderFor(none, "openai-completions"), "authorization");
+    assert.equal(authHeaderFor(none, "discovery"), "authorization");
+  });
+
+  it("accepts a per-target object in the file", () => {
+    const warnings: string[] = [];
+    const parsed = parseAuthHeaders({ "anthropic-messages": "Authorization", discovery: "x-api-key" }, "p", warnings);
+    assert.deepEqual(parsed, { "anthropic-messages": "authorization", discovery: "x-api-key" });
+    assert.equal(authHeaderFor({ authHeaders: parsed }, "anthropic-messages"), "authorization");
+    assert.equal(authHeaderFor({ authHeaders: parsed }, "openai-responses"), "authorization", "unset targets stay native");
+    assert.deepEqual(warnings, []);
+  });
+
+  it("warns on unknown targets and bad header names", () => {
+    const warnings: string[] = [];
+    assert.deepEqual(parseAuthHeaders({ "google-vertex": "x-api-key", "openai-responses": "bad header" }, "p", warnings), {});
+    assert.equal(warnings.length, 2);
+    assert.deepEqual(parseAuthHeaders(42, "p", warnings), {});
+    assert.equal(warnings.length, 3);
+  });
+
+  it("reads INFERENCE_GATEWAY_AUTH_HEADER as one header or target=header pairs", () => {
+    const warnings: string[] = [];
+    assert.equal(parseAuthHeaderEnv("X-Api-Key", warnings)["openai-completions"], "x-api-key");
+    assert.deepEqual(parseAuthHeaderEnv("anthropic-messages=authorization, discovery=x-api-key", warnings), {
+      "anthropic-messages": "authorization",
+      discovery: "x-api-key",
+    });
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(parseAuthHeaderEnv("nope=authorization", warnings), {});
+    assert.equal(warnings.length, 1);
+    const { providers } = envProvider(
+      { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com", INFERENCE_GATEWAY_AUTH_HEADER: "anthropic-messages=authorization" },
+      HOME,
+    );
+    assert.deepEqual(providers[0].authHeaders, { "anthropic-messages": "authorization" });
+  });
+});
+
+describe("extra models", () => {
+  it("reads INFERENCE_GATEWAY_EXTRA_MODELS id=api pairs, ids verbatim", () => {
+    const warnings: string[] = [];
+    assert.deepEqual(parseExtraModelsEnv("gpt-6-luna=openai-responses, oss/zai-org/glm-5-3=openai-completions,", warnings), {
+      "gpt-6-luna": { api: "openai-responses" },
+      "oss/zai-org/glm-5-3": { api: "openai-completions" },
+    });
+    assert.deepEqual(warnings, []);
+  });
+
+  it("warns on malformed pairs", () => {
+    const warnings: string[] = [];
+    assert.deepEqual(parseExtraModelsEnv("no-api,=openai-responses,x=google-vertex,a b=openai-responses", warnings), {});
+    assert.equal(warnings.length, 4);
+  });
+
+  it("feeds the env provider", () => {
+    const { providers } = envProvider(
+      { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com", INFERENCE_GATEWAY_EXTRA_MODELS: "gpt-6-luna=openai-responses" },
+      HOME,
+    );
+    assert.deepEqual(providers[0].models, { "gpt-6-luna": { api: "openai-responses" } });
   });
 });
 
@@ -273,6 +351,36 @@ describe("mergeProviders", () => {
     assert.equal(gateway.defaultApi, "anthropic-messages");
     assert.deepEqual(gateway.include, ["claude-*"]);
     assert.equal(gateway.models["claude-sonnet-5"].contextWindow, 1000);
+  });
+
+  it("merges auth-header overrides and models per key, file fields winning per model", () => {
+    const fromEnv = envProvider(
+      {
+        INFERENCE_GATEWAY_BASE_URL: "https://env.example.com",
+        INFERENCE_GATEWAY_AUTH_HEADER: "discovery=x-api-key",
+        INFERENCE_GATEWAY_EXTRA_MODELS: "a=openai-responses,b=openai-completions",
+      },
+      HOME,
+    ).providers;
+    const fromFile = parseConfigFile(
+      {
+        providers: {
+          gateway: {
+            baseUrl: "https://file.example.com",
+            authHeader: { "anthropic-messages": "authorization", discovery: "authorization" },
+            models: { b: { api: "anthropic-messages", contextWindow: 9 }, c: { api: "openai-responses" } },
+          },
+        },
+      },
+      HOME,
+    ).providers;
+    const [gateway] = mergeProviders(fromEnv, fromFile);
+    assert.deepEqual(gateway.authHeaders, { "anthropic-messages": "authorization", discovery: "x-api-key" });
+    assert.deepEqual(gateway.models, {
+      a: { api: "openai-responses" },
+      b: { api: "anthropic-messages", contextWindow: 9 },
+      c: { api: "openai-responses" },
+    });
   });
 });
 
