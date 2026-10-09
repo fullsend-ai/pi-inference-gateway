@@ -10,7 +10,7 @@ import { createProvider, normalizeContext } from "@earendil-works/pi-ai";
 import type { Context, FetchFunction } from "@earendil-works/pi-ai";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { parseConfigFile, type GatewayConfig } from "./config.ts";
-import { buildModel, discoverModels, extraModels, findCatalogModel, modelsFromList, parseModelEntry, parseModelList } from "./discovery.ts";
+import { LIMITS, buildModel, discoverModels, extraModels, findCatalogModel, modelsFromList, parseModelEntry, parseModelList } from "./discovery.ts";
 import { createGatewayProvider, gatewayProviderOptions, initialModels, onceWarn } from "./provider.ts";
 import { sseFor } from "./test-fixtures.ts";
 
@@ -270,6 +270,26 @@ describe("D3: wildcard list entries are dropped with one warning", () => {
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /openai\/\*, anthropic\/\*, \*-mini/);
     assert.match(warnings[0], /add concrete ids via "models"/);
+  });
+
+  it("counts wildcards toward the list cap and keeps only a few ids for the warning", () => {
+    const data = [
+      ...Array.from({ length: 5000 }, (_, index) => ({ id: `vendor-${index}/*` })),
+      ...Array.from({ length: 10 }, (_, index) => ({ id: `chat-${index}` })),
+    ];
+    const parsed = parseModelList({ data });
+    assert.equal(parsed.wildcardCount, LIMITS.maxModels, "wildcards stop at the cap");
+    assert.equal(parsed.entries.length, 0);
+    assert.equal(parsed.dropped, 5000 - LIMITS.maxModels + 10, "everything past the cap is dropped");
+    assert.ok(parsed.wildcards.length <= 20, String(parsed.wildcards.length));
+    const { warnings } = modelsFromList({ data: data.slice(0, 30) }, config());
+    assert.match(warnings[0], /\(\+25 more\)/);
+  });
+
+  it("deduplicates wildcard ids", () => {
+    const parsed = parseModelList({ data: [{ id: "a/*" }, { id: "a/*" }, { id: "b/*" }] });
+    assert.deepEqual(parsed.wildcards, ["a/*", "b/*"]);
+    assert.equal(parsed.wildcardCount, 2);
   });
 
   it("no warning when nothing was a wildcard", () => {

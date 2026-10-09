@@ -351,6 +351,8 @@ export interface ParsedModelList {
   dropped: number;
   /** Ids containing `*`: a gateway listing a routing pattern (agentgateway `openai/*`), not a model. */
   wildcards: string[];
+  /** Distinct wildcard ids seen (within the cap); `wildcards` holds only the first few. */
+  wildcardCount: number;
   /** Entries dropped as embedding, image, audio, rerank, ... models (see isNonChatEntry). */
   nonChat: number;
 }
@@ -378,10 +380,14 @@ export function isNonChatEntry(raw: unknown): boolean {
   return Array.isArray(outputs) && outputs.length > 0 && !outputs.includes("text");
 }
 
+/** Wildcard ids kept for the warning text; the rest are only counted. */
+const MAX_WILDCARD_SAMPLES = 20;
+
 /**
  * Parse a model-list body: OpenAI `{data:[...]}`, `{models:[...]}`, or a bare array.
- * Non-chat entries and wildcard ids are set aside first, so they never count against the cap;
- * duplicates keep the first occurrence; the list is capped at `LIMITS.maxModels`.
+ * Non-chat entries are set aside first and never count against the cap. Models and distinct
+ * wildcard ids together are capped at `LIMITS.maxModels`; everything past the cap, malformed
+ * entries and duplicates are `dropped`. Duplicates keep the first occurrence.
  */
 export function parseModelList(body: unknown): ParsedModelList {
   let list: unknown[];
@@ -393,6 +399,7 @@ export function parseModelList(body: unknown): ParsedModelList {
   const entries: GatewayModelEntry[] = [];
   const wildcards: string[] = [];
   const seen = new Set<string>();
+  let wildcardCount = 0;
   let dropped = 0;
   let nonChat = 0;
   for (const raw of list) {
@@ -401,24 +408,25 @@ export function parseModelList(body: unknown): ParsedModelList {
       continue;
     }
     const entry = parseModelEntry(raw);
-    if (entry?.id.includes("*")) {
-      if (!wildcards.includes(entry.id)) wildcards.push(entry.id);
-      continue;
-    }
-    if (!entry || seen.has(entry.id) || entries.length >= LIMITS.maxModels) {
+    if (!entry || seen.has(entry.id) || entries.length + wildcardCount >= LIMITS.maxModels) {
       dropped++;
       continue;
     }
     seen.add(entry.id);
+    if (entry.id.includes("*")) {
+      wildcardCount++;
+      if (wildcards.length < MAX_WILDCARD_SAMPLES) wildcards.push(entry.id);
+      continue;
+    }
     entries.push(entry);
   }
-  return { entries, dropped, wildcards, nonChat };
+  return { entries, dropped, wildcards, wildcardCount, nonChat };
 }
 
 /** The one warning for wildcard ids, or none. */
-function wildcardWarning(wildcards: readonly string[]): string[] {
-  if (wildcards.length === 0) return [];
-  const shown = wildcards.slice(0, 5).join(", ") + (wildcards.length > 5 ? ` (+${wildcards.length - 5} more)` : "");
+function wildcardWarning(wildcards: readonly string[], count: number): string[] {
+  if (count === 0) return [];
+  const shown = wildcards.slice(0, 5).join(", ") + (count > 5 ? ` (+${count - 5} more)` : "");
   return [
     `ignored wildcard model id(s) ${shown}: the gateway lists a routing pattern, not a model; ` +
       `add concrete ids via "models" in the config file (or ${ENV.extraModels})`,
@@ -432,15 +440,16 @@ function wildcardWarning(wildcards: readonly string[]): string[] {
  */
 function assertUsable(parsed: ParsedModelList): void {
   if (parsed.entries.length > 0) return;
-  const total = parsed.dropped + parsed.wildcards.length + parsed.nonChat;
+  const total = parsed.dropped + parsed.wildcardCount + parsed.nonChat;
   if (total === 0) throw new Error("model list is empty");
   const parts = [
-    parsed.wildcards.length > 0 ? `${parsed.wildcards.length} wildcard` : "",
+    parsed.wildcardCount > 0 ? `${parsed.wildcardCount} wildcard` : "",
     parsed.nonChat > 0 ? `${parsed.nonChat} non-chat` : "",
     parsed.dropped > 0 ? `${parsed.dropped} malformed` : "",
   ].filter(Boolean);
   throw new Error(`model list has no usable model (${parts.join(", ")})`);
 }
+
 
 // --- selection --------------------------------------------------------------------------------
 
@@ -824,14 +833,14 @@ function placeholderWindowWarning(entries: readonly GatewayModelEntry[], config:
 }
 
 function buildFromParsed(parsed: ParsedModelList, config: GatewayConfig): ModelsFromList {
-  const { entries, dropped, wildcards } = parsed;
+  const { entries, dropped, wildcards, wildcardCount } = parsed;
   const included = entries.filter((entry) => isIncluded(entry.id, config));
   const listed = included.map((entry) => buildModel(entry, config));
   const listedIds = new Set(entries.map((entry) => entry.id));
   return {
     models: [...listed, ...extraModels(config, listedIds)],
     dropped,
-    warnings: [...wildcardWarning(wildcards), ...placeholderWindowWarning(included, config)],
+    warnings: [...wildcardWarning(wildcards, wildcardCount), ...placeholderWindowWarning(included, config)],
   };
 }
 
