@@ -1,7 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   CONFIG_FILE_NAME,
+  EXTENSION_DIR,
   LOCAL_CONFIG_FILE_NAME,
   agentDir,
   authHeaderEntry,
@@ -937,6 +940,160 @@ describe("local overlay file", () => {
     assert.equal(Object.getPrototypeOf(models), Object.prototype);
     assert.ok(Object.hasOwn(models, "__proto__"));
     assert.deepEqual(Object.keys(models).sort(), ["__proto__", "claude-sonnet-5", "gpt-6-luna"]);
+  });
+});
+
+describe("config shipped in the extension directory", () => {
+  const EXT = "/opt/pi/extensions/inference-gateway";
+  const EXT_SHARED = `${EXT}/${CONFIG_FILE_NAME}`;
+  const EXT_LOCAL = `${EXT}/${LOCAL_CONFIG_FILE_NAME}`;
+  const SHARED = `${HOME}/.pi/agent/${CONFIG_FILE_NAME}`;
+  const LOCAL = `${HOME}/.pi/agent/${LOCAL_CONFIG_FILE_NAME}`;
+  const files =
+    (contents: Record<string, string>) =>
+    async (path: string): Promise<string | undefined> =>
+      Object.hasOwn(contents, path) ? contents[path] : undefined;
+  const env = { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com" };
+  const shipped = JSON.stringify({
+    providers: {
+      gateway: {
+        baseUrlEnv: "INFERENCE_GATEWAY_BASE_URL",
+        exclude: ["*embed*"],
+        models: {
+          "claude-sonnet-5": { api: "anthropic-messages", contextWindow: 200000, compat: { supportsMidConvoEffort: false } },
+          "gpt-6-luna": { api: "openai-responses", maxTokens: 16384 },
+        },
+      },
+    },
+  });
+
+  it("is the directory holding package.json", () => {
+    assert.ok(existsSync(join(EXTENSION_DIR, "package.json")), EXTENSION_DIR);
+    assert.ok(existsSync(join(EXTENSION_DIR, "src", "config.ts")), EXTENSION_DIR);
+  });
+
+  it("applies a file found only in the extension directory", async () => {
+    const seen: string[] = [];
+    const read = files({ [EXT_SHARED]: shipped });
+    const { providers, warnings } = await loadConfig({
+      env,
+      home: HOME,
+      extensionDir: EXT,
+      readText: async (path) => {
+        seen.push(path);
+        return read(path);
+      },
+    });
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(seen, [EXT_SHARED, EXT_LOCAL, SHARED, LOCAL]);
+    assert.equal(providers.length, 1);
+    const [gateway] = providers;
+    assert.equal(gateway.baseUrl, "https://gw.example.com");
+    assert.equal(gateway.apiKeyEnv, "INFERENCE_GATEWAY_API_KEY");
+    assert.deepEqual(gateway.exclude, ["*embed*"]);
+    assert.deepEqual(gateway.models["claude-sonnet-5"], {
+      api: "anthropic-messages",
+      contextWindow: 200000,
+      compat: { supportsMidConvoEffort: false },
+    });
+  });
+
+  it("leaves an agent-directory-only config unchanged", async () => {
+    const agentOnly = JSON.stringify({ providers: { corp: { baseUrl: "https://corp.example.com", apiKeyEnv: "CORP_KEY" } } });
+    const withExt = await loadConfig({ env: {}, home: HOME, extensionDir: EXT, readText: files({ [SHARED]: agentOnly }) });
+    const without = await loadConfig({ env: {}, home: HOME, readText: files({ [SHARED]: agentOnly }) });
+    assert.deepEqual(withExt, without);
+    assert.equal(withExt.providers[0].id, "corp");
+  });
+
+  it("lets the agent directory's files win per model, keeping extension-only models and keys", async () => {
+    const user = JSON.stringify({
+      providers: { gateway: { models: { "claude-sonnet-5": { contextWindow: 1000000, compat: { supportsStrictTools: false } } } } },
+    });
+    const { providers, warnings } = await loadConfig({ env, home: HOME, extensionDir: EXT, readText: files({ [EXT_SHARED]: shipped, [SHARED]: user }) });
+    assert.deepEqual(warnings, []);
+    const [gateway] = providers;
+    assert.deepEqual(gateway.exclude, ["*embed*"]);
+    assert.deepEqual(gateway.models["claude-sonnet-5"], {
+      api: "anthropic-messages",
+      contextWindow: 1000000,
+      compat: { supportsMidConvoEffort: false, supportsStrictTools: false },
+    });
+    assert.deepEqual(gateway.models["gpt-6-luna"], { api: "openai-responses", maxTokens: 16384 });
+  });
+
+  it("merges the extension directory's overlay over its shared file, under both agent-directory files", async () => {
+    const model = (contextWindow: number, maxTokens: number) =>
+      JSON.stringify({ providers: { gateway: { models: { "claude-sonnet-5": { contextWindow, maxTokens } } } } });
+    const extLocal = JSON.stringify({ providers: { gateway: { models: { "claude-sonnet-5": { contextWindow: 150000, maxTokens: 8000 } } } } });
+    const layered = await loadConfig({ env, home: HOME, extensionDir: EXT, readText: files({ [EXT_SHARED]: shipped, [EXT_LOCAL]: extLocal }) });
+    assert.deepEqual(layered.warnings, []);
+    assert.equal(layered.providers[0].models["claude-sonnet-5"].contextWindow, 150000);
+    assert.equal(layered.providers[0].models["claude-sonnet-5"].maxTokens, 8000);
+
+    for (const userPath of [SHARED, LOCAL]) {
+      const { providers, warnings } = await loadConfig({
+        env,
+        home: HOME,
+        extensionDir: EXT,
+        readText: files({ [EXT_SHARED]: shipped, [EXT_LOCAL]: extLocal, [userPath]: model(100000, 4000) }),
+      });
+      assert.deepEqual(warnings, [], userPath);
+      assert.equal(providers[0].models["claude-sonnet-5"].contextWindow, 100000, userPath);
+      assert.equal(providers[0].models["claude-sonnet-5"].maxTokens, 4000, userPath);
+      assert.equal(providers[0].models["claude-sonnet-5"].api, "anthropic-messages", userPath);
+    }
+  });
+
+  it("warns once, naming the file, about a malformed extension-directory file and ignores it", async () => {
+    const user = JSON.stringify({ providers: { corp: { baseUrl: "https://corp.example.com", apiKeyEnv: "CORP_KEY" } } });
+    for (const bad of ['{ "providers": { "gateway": { "apiKeyEnv": "CORP_KEY" oops', "[]", JSON.stringify({ gateway: {} })]) {
+      const { providers, warnings } = await loadConfig({ env: {}, home: HOME, extensionDir: EXT, readText: files({ [EXT_SHARED]: bad, [SHARED]: user }) });
+      assert.equal(warnings.length, 1, bad);
+      assert.ok(warnings[0].startsWith(`${EXT_SHARED}: `), warnings[0]);
+      assert.equal(warnings[0].includes("CORP_KEY"), false, warnings[0]);
+      assert.deepEqual(providers.map((provider) => provider.id), ["corp"], bad);
+    }
+  });
+
+  it("names every file a merged entry came from in its warnings", async () => {
+    const user = JSON.stringify({ providers: { gateway: { defaultApi: "nope" } } });
+    const { warnings } = await loadConfig({ env, home: HOME, extensionDir: EXT, readText: files({ [EXT_SHARED]: shipped, [LOCAL]: user }) });
+    assert.equal(warnings.length, 1);
+    assert.ok(warnings[0].startsWith(`${EXT_SHARED} + ${LOCAL}: providers.gateway: "defaultApi"`), warnings[0]);
+  });
+
+  it("is silent with no file in either directory and no environment", async () => {
+    const result = await loadConfig({ env: {}, home: HOME, extensionDir: EXT, readText: files({}) });
+    assert.deepEqual(result.providers, []);
+    assert.deepEqual(result.warnings, []);
+  });
+
+  it("binds INFERENCE_GATEWAY_* credentials to INFERENCE_GATEWAY_BASE_URL for its entries too", async () => {
+    const elsewhere = JSON.stringify({ providers: { other: { baseUrl: "https://elsewhere.example.com", apiKeyEnv: "INFERENCE_GATEWAY_API_KEY" } } });
+    const { providers, warnings } = await loadConfig({
+      env: { ...env, INFERENCE_GATEWAY_API_KEY: "k" },
+      home: HOME,
+      extensionDir: EXT,
+      readText: files({ [EXT_SHARED]: elsewhere }),
+    });
+    assert.deepEqual(providers.map((provider) => provider.id), ["gateway"]);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /other: refused .*INFERENCE_GATEWAY_API_KEY/);
+  });
+
+  it("reads a directory that is also the agent directory only once", async () => {
+    const seen: string[] = [];
+    await loadConfig({
+      env: { PI_CODING_AGENT_DIR: EXT },
+      home: HOME,
+      extensionDir: `${EXT}/`,
+      readText: async (path) => {
+        seen.push(path);
+        return undefined;
+      },
+    });
+    assert.deepEqual(seen, [EXT_SHARED, EXT_LOCAL]);
   });
 });
 

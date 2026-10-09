@@ -22,7 +22,10 @@ logs. Back to the [README](../README.md).
 
   Give any other gateway a variable of its own (`apiKeyEnv`, `passwordEnv`).
 - **Only your user-level config is read**: `~/.pi/agent/inference-gateway.json` and its local
-  overlay `inference-gateway.local.json`, or the same files under `$PI_CODING_AGENT_DIR`. A project's
+  overlay `inference-gateway.local.json`, or the same files under `$PI_CODING_AGENT_DIR`, merged
+  over the same two files in the extension's own install directory (see
+  [Shipping a config with the extension](configuration.md#shipping-a-config-with-the-extension)).
+  No variable points the extension at another config file. A project's
   `.pi/` directory is never consulted, so a cloned repository cannot point your credentials at its
   own host. A provider whose `baseUrlEnv` resolves to another URL than `INFERENCE_GATEWAY_BASE_URL`
   is refused `INFERENCE_GATEWAY_*` credentials exactly like a literal `baseUrl`.

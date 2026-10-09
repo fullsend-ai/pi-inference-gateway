@@ -104,6 +104,38 @@ Local overlay, kept on this machine:
 } } } }
 ```
 
+## Shipping a config with the extension
+
+`inference-gateway.json` and `inference-gateway.local.json` are also read from the extension's own
+directory, next to its `package.json`. These files are the lowest layer: the extension directory's
+shared file, then its `.local.json`, then the two files in `~/.pi/agent` (or `$PI_CODING_AGENT_DIR`),
+each merged over the ones before it by the rules above (per provider, per model). Your user-level
+files always win. A missing file is silent; a malformed or unreadable one is reported with its own
+path and then ignored. No variable selects another directory: a file inside the installed extension
+is only as writable as the extension itself.
+
+This is for hosts that run pi in a sandbox whose config directory belongs to the runner, so users
+cannot put a file there, but can install the extension (vendored as a plugin, say). Only the
+environment variables reach such a sandbox, and per-model `compat`, `contextWindow`, `maxTokens` or
+`exclude` need a file. Ship them with the extension:
+
+```json
+{ "providers": { "gateway": {
+  "baseUrlEnv": "INFERENCE_GATEWAY_BASE_URL",
+  "exclude": ["*embed*"],
+  "models": {
+    "claude-sonnet-5": { "api": "anthropic-messages", "contextWindow": 200000,
+                         "compat": { "supportsMidConvoEffort": false } }
+  } } } }
+```
+
+In such a file, leave credentials and the base URL to the environment, as above: give the entry the
+env provider's id (`gateway`, or `INFERENCE_GATEWAY_PROVIDER_ID`) and
+`"baseUrlEnv": "INFERENCE_GATEWAY_BASE_URL"`, so the environment supplies the base URL and key; for
+another gateway, use `baseUrlEnv` and `apiKeyEnv`. The same rules apply as for any config file:
+`INFERENCE_GATEWAY_*` credentials still only go to `INFERENCE_GATEWAY_BASE_URL` (see
+[Security](security.md)), and warnings name the file they came from.
+
 ## Auth
 
 Each request carries exactly one auth header, chosen per target by an **auth scheme**:

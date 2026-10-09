@@ -4,7 +4,8 @@
 
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { validateCompat } from "./compat.ts";
 
@@ -294,6 +295,13 @@ export function expandHome(path: string, home: string): string {
   if (path.startsWith("~/")) return join(home, path.slice(2));
   return path;
 }
+
+/**
+ * The directory this extension is installed in (next to `package.json`, the parent of `src/`). A
+ * config file there ships with the extension, so it carries the extension's own integrity: no
+ * environment variable can point the extension at another file.
+ */
+export const EXTENSION_DIR: string = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** `$PI_CODING_AGENT_DIR`, else `~/.pi/agent` — the same directory pi itself uses. */
 export function agentDir(env: Record<string, string | undefined>, home: string): string {
@@ -876,6 +884,12 @@ export interface LoadConfigDeps {
   home?: string;
   /** Resolves to the file text, or undefined when the file does not exist. */
   readText?: (path: string) => Promise<string | undefined>;
+  /**
+   * Directory of the config files shipped with the extension, read before the agent directory's.
+   * Defaults to EXTENSION_DIR when `readText` is the filesystem reader; with an injected `readText`
+   * it is read only when given here, so a test's reader is never asked for a real path.
+   */
+  extensionDir?: string;
 }
 
 async function readTextIfExists(path: string): Promise<string | undefined> {
@@ -919,24 +933,41 @@ async function readProviders(
 /**
  * Everything the extension needs to decide what to register. No providers and no warnings means
  * "not configured": the extension stays silent.
+ *
+ * Config files, lowest precedence first, each merged over the ones before it (mergeConfigOverlay):
+ * the extension directory's `inference-gateway.json` and `.local.json`, then the agent directory's.
  */
 export async function loadConfig(deps: LoadConfigDeps = {}): Promise<ParseResult & { path: string }> {
   const env = deps.env ?? process.env;
   const home = deps.home ?? homedir();
   const readText = deps.readText ?? readTextIfExists;
+  const extensionDir = deps.extensionDir ?? (deps.readText ? undefined : EXTENSION_DIR);
   const dir = agentDir(env, home);
   const path = join(dir, CONFIG_FILE_NAME);
   const localPath = join(dir, LOCAL_CONFIG_FILE_NAME);
+  const paths = [
+    // The same directory twice would only repeat every file name in its warnings.
+    ...(extensionDir !== undefined && resolve(extensionDir) !== resolve(dir)
+      ? [join(extensionDir, CONFIG_FILE_NAME), join(extensionDir, LOCAL_CONFIG_FILE_NAME)]
+      : []),
+    path,
+    localPath,
+  ];
 
   const fromEnv = envProvider(env, home);
   const fromFile: ParseResult = { providers: [], warnings: [] };
   const sources = new Map<string, string>();
-  const shared = await readProviders(path, readText, fromFile.warnings);
-  const local = await readProviders(localPath, readText, fromFile.warnings);
-  for (const [id, raw] of Object.entries(mergeConfigOverlay(shared ?? {}, local ?? {}))) {
+  const files: Array<[string, Record<string, unknown>]> = [];
+  for (const file of paths) {
+    const providers = await readProviders(file, readText, fromFile.warnings);
+    if (providers) files.push([file, providers]);
+  }
+  const combined = files.reduce<Record<string, unknown>>((merged, [, providers]) => mergeConfigOverlay(merged, providers), {});
+  for (const [id, raw] of Object.entries(combined)) {
     // A warning names every file the (merged) entry came from.
-    const where = [shared && Object.hasOwn(shared, id) ? path : "", local && Object.hasOwn(local, id) ? localPath : ""]
-      .filter(Boolean)
+    const where = files
+      .filter(([, providers]) => Object.hasOwn(providers, id))
+      .map(([file]) => file)
       .join(" + ");
     sources.set(id, where);
     const warnings: string[] = [];
