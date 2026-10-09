@@ -265,7 +265,10 @@ and the list pi saved from its last interactive refresh.
   `INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS=0`, the startup request is skipped silently and you get the
   same fallback set.
 - **A list with no usable model is a failure**, not an empty catalog: an empty list, or one whose
-  every entry is malformed, a wildcard or a non-chat model, keeps the last good list.
+  every entry is malformed, a wildcard or a non-chat model, keeps the last good list. So when a
+  gateway that filters its list per caller (such as [agentgateway](#agentgateway)) authorises zero
+  models for you, the previous models stay listed and requests for them fail authorisation at the
+  gateway. The gateway's authorisation is never bypassed; only the list shown is stale.
 - **Dropped entries:** ids containing `*` (a routing pattern, not a model; one warning names them)
   and non-chat models (LiteLLM `mode` or a `type` such as `embedding`, `image_generation`,
   `audio_transcription`, `rerank`, `moderation`; or `architecture.output_modalities` without text).
@@ -519,13 +522,14 @@ pi 0.99.2.
 | `400 ... unknown variant ..., expected one of none, minimal, low, medium, high, xhigh, max` | a `reasoning_effort` value from a copied `thinkingLevelMap` | set it per model, see [Thinking levels](#thinking-levels-thinkinglevelmap) |
 
 These errors are `text/plain`; the extension shows the start of such a body in discovery errors
-(credentials redacted), and pi shows it for model requests (the walkthrough's two failure cases,
+(credentials redacted, or `(body omitted)` when a credential is under 8 characters; see
+[Security](#security)), and pi shows it for model requests (the walkthrough's two failure cases,
 pasted from the mock):
 
 ```console
 $ INFERENCE_GATEWAY_AUTH_HEADER= pi -ne -e . --no-session -p --model gateway/claude-sonnet-5 "say hi" </dev/null
 401 authentication failure: no bearer token found
-$ INFERENCE_GATEWAY_API_KEY=wrong pi -ne -e . --list-models
+$ INFERENCE_GATEWAY_API_KEY=wrong-token-value pi -ne -e . --list-models
 [pi-inference-gateway] gateway: model discovery failed (model list request returned HTTP 401: authentication failure: no bearer token found); using 2 fallback model(s) plus pi's last saved list
 ```
 
@@ -571,7 +575,12 @@ $ INFERENCE_GATEWAY_API_KEY=wrong pi -ne -e . --list-models
   No `!command` keys, no shell-out.
 - **Redirects are never followed**, on model requests or on discovery: a redirect is an error, so a
   key cannot be forwarded to another origin.
-- **Credentials are never logged.** Warnings name variables and files, never their values.
+- **Credentials are never logged.** Warnings name variables and files, never their values. A
+  discovery error shows the start of a `text/plain` error body only after replacing every form of
+  the credentials it sent; if any credential is shorter than 8 characters (Basic's default username
+  `gateway` is 7), the body is replaced by `(body omitted)`.
+- **Model-request error bodies are printed by pi, not by this extension**, and are not redacted:
+  a gateway or backend that echoes the request's credentials in an error can expose them there.
 
 ## Try it locally
 
