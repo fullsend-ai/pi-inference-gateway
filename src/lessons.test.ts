@@ -4,10 +4,17 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createModels, InMemoryModelsStore } from "@earendil-works/pi-ai";
-import type { FetchFunction, ModelsPublication, RefreshModelsContext } from "@earendil-works/pi-ai";
-import type { GatewayApi, GatewayConfig } from "./config.ts";
+import type { FetchFunction, ModelsPublication, Provider, RefreshModelsContext } from "@earendil-works/pi-ai";
+import { loadConfig, type GatewayApi, type GatewayConfig } from "./config.ts";
 import { LIMITS, buildModel, discoverModels, modelsFromList, parseModelEntry, parseModelList, type GatewayModel } from "./discovery.ts";
-import { SNAPSHOT_STAMP, createGatewayProvider, initialModels } from "./provider.ts";
+import {
+  FACTORY_DISCOVERY_TIMEOUT_MS,
+  SNAPSHOT_STAMP,
+  createGatewayProvider,
+  factoryDiscovery,
+  initialModels,
+  registerGateways,
+} from "./provider.ts";
 
 function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
@@ -101,6 +108,92 @@ describe("lesson 1: an all-invalid or empty list is a failure, not an empty cata
     const result = await initialModels(config(), { env: ENV, fetch });
     assert.equal(result.fresh, true);
     assert.deepEqual(modelsFromList([], config()).models, []);
+  });
+});
+
+describe("lesson 2: PI_OFFLINE and INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS", () => {
+  const BASE = { INFERENCE_GATEWAY_BASE_URL: "http://127.0.0.1:4000", INFERENCE_GATEWAY_API_KEY: "tok" };
+  const FILE = JSON.stringify({ providers: { gateway: { baseUrl: "http://127.0.0.1:4000", fallbackModels: ["fb"] } } });
+
+  async function register(env: Record<string, string>) {
+    const providers: Provider<GatewayApi>[] = [];
+    const warnings: string[] = [];
+    const { urls, fetch } = listFetch({ data: [{ id: "live" }] });
+    const registered = await registerGateways(
+      { registerProvider: (provider) => providers.push(provider) },
+      { env: { ...BASE, ...env }, home: "/home/user", readText: async () => FILE, fetch, warn: (message) => warnings.push(message) },
+    );
+    return { registered, urls, warnings, models: ids(providers[0]?.getModels() ?? []) };
+  }
+
+  for (const value of ["1", "true", "0", ""]) {
+    it(`PI_OFFLINE=${JSON.stringify(value)} skips load-time discovery silently (pi treats any set value as offline)`, async () => {
+      const { registered, urls, warnings, models } = await register({ PI_OFFLINE: value });
+      assert.deepEqual(registered, ["gateway"]);
+      assert.deepEqual(urls, []);
+      assert.deepEqual(warnings, []);
+      assert.deepEqual(models, ["fb"], "fallbacks now, pi's saved snapshot on its offline refresh");
+    });
+  }
+
+  it("INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS=0 skips load-time discovery silently", async () => {
+    const { urls, warnings, models } = await register({ INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS: "0" });
+    assert.deepEqual(urls, []);
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(models, ["fb"]);
+  });
+
+  it("a positive value is the load-time timeout", async () => {
+    const providers: Provider<GatewayApi>[] = [];
+    const warnings: string[] = [];
+    const hang: FetchFunction = (_input, init) =>
+      new Promise((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+    await registerGateways(
+      { registerProvider: (provider) => providers.push(provider) },
+      {
+        env: { ...BASE, INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS: "25" },
+        home: "/home/user",
+        readText: async () => undefined,
+        fetch: hang,
+        warn: (message) => warnings.push(message),
+      },
+    );
+    assert.match(warnings.join("\n"), /timed out after 25 ms/);
+  });
+
+  it("an invalid value warns and keeps the default", async () => {
+    const { urls, warnings, models } = await register({ INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS: "soon" });
+    assert.deepEqual(urls, ["http://127.0.0.1:4000/v1/models"]);
+    assert.deepEqual(models, ["live"]);
+    assert.match(warnings.join("\n"), /INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS: must be a whole number of milliseconds \(0 skips/);
+  });
+
+  it("factoryDiscovery reads both switches", () => {
+    assert.deepEqual(factoryDiscovery({}), { skip: false, timeoutMs: FACTORY_DISCOVERY_TIMEOUT_MS, warnings: [] });
+    assert.deepEqual(factoryDiscovery({ INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS: "1500" }), { skip: false, timeoutMs: 1500, warnings: [] });
+    assert.equal(factoryDiscovery({ PI_OFFLINE: "1", INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS: "1500" }).skip, true);
+  });
+});
+
+describe("E4: a file provider's baseUrl that the environment overrides is reported", () => {
+  it("warns once when INFERENCE_GATEWAY_BASE_URL replaces a different file baseUrl", async () => {
+    const { providers, warnings } = await loadConfig({
+      env: { INFERENCE_GATEWAY_BASE_URL: "https://gateway.example.com", INFERENCE_GATEWAY_API_KEY: "tok" },
+      home: "/home/user",
+      readText: async () => JSON.stringify({ providers: { gateway: { baseUrl: "https://other.example.com/v1" } } }),
+    });
+    assert.equal(providers[0].baseUrl, "https://gateway.example.com");
+    assert.equal(warnings.length, 1, warnings.join("\n"));
+    assert.match(warnings[0], /providers\.gateway\.baseUrl \(https:\/\/other\.example\.com\) is ignored: INFERENCE_GATEWAY_BASE_URL \(https:\/\/gateway\.example\.com\) configures this provider/);
+  });
+
+  it("is silent when both name the same gateway (after normalisation)", async () => {
+    const { warnings } = await loadConfig({
+      env: { INFERENCE_GATEWAY_BASE_URL: "https://gateway.example.com/v1/" },
+      home: "/home/user",
+      readText: async () => JSON.stringify({ providers: { gateway: { baseUrl: "https://gateway.example.com" } } }),
+    });
+    assert.deepEqual(warnings, []);
   });
 });
 

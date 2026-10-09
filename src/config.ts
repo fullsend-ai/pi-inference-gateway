@@ -75,6 +75,7 @@ export const ENV = {
   defaultApi: "INFERENCE_GATEWAY_DEFAULT_API",
   authHeader: "INFERENCE_GATEWAY_AUTH_HEADER",
   extraModels: "INFERENCE_GATEWAY_EXTRA_MODELS",
+  discoveryTimeoutMs: "INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS",
 } as const;
 
 /** Per-model overrides from the config file. Every field wins over the gateway and pi's catalog. */
@@ -643,7 +644,7 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
 export function mergeProviders(
   fromEnv: GatewayConfig[],
   fromFile: GatewayConfig[],
-  { envDefaultApiSet = false }: { envDefaultApiSet?: boolean } = {},
+  { envDefaultApiSet = false, warnings = [] }: { envDefaultApiSet?: boolean; warnings?: string[] } = {},
 ): GatewayConfig[] {
   const merged = new Map<string, GatewayConfig>();
   for (const provider of fromFile) merged.set(provider.id, provider);
@@ -652,6 +653,12 @@ export function mergeProviders(
     if (!file) {
       merged.set(provider.id, provider);
       continue;
+    }
+    if (file.baseUrl !== provider.baseUrl) {
+      warnings.push(
+        `providers.${file.id}.baseUrl (${file.baseUrl}) is ignored: ${ENV.baseUrl} (${provider.baseUrl}) configures this provider; ` +
+          `remove one of them, or give the file entry another id`,
+      );
     }
     merged.set(provider.id, {
       ...file,
@@ -722,13 +729,20 @@ export async function loadConfig(deps: LoadConfigDeps = {}): Promise<ParseResult
       fromFile = { providers: parsed.providers, warnings: parsed.warnings.map((warning) => `${path}: ${warning}`) };
     }
   }
-  const merged = mergeProviders(fromEnv.providers, fromFile.providers, { envDefaultApiSet: fromEnv.defaultApiSet });
+  const mergeWarnings: string[] = [];
+  const merged = mergeProviders(fromEnv.providers, fromFile.providers, { envDefaultApiSet: fromEnv.defaultApiSet, warnings: mergeWarnings });
   const bound = bindEnvCredentials(merged, env);
   const cleaned = dropCredentialHeaders(bound.providers);
   return {
     path,
     providers: cleaned.providers,
-    warnings: [...fromEnv.warnings, ...fromFile.warnings, ...bound.warnings, ...cleaned.warnings],
+    warnings: [
+      ...fromEnv.warnings,
+      ...fromFile.warnings,
+      ...mergeWarnings.map((warning) => `${path}: ${warning}`),
+      ...bound.warnings,
+      ...cleaned.warnings,
+    ],
   };
 }
 

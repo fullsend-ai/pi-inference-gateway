@@ -19,6 +19,7 @@ import {
   authHeaderFor,
   credentialHeaderNames,
   credentialKind,
+  ENV,
   loadConfig,
   resolveCredentials,
   type CredentialKind,
@@ -324,6 +325,25 @@ export function createGatewayProvider(
   };
 }
 
+/**
+ * Whether and how long the extension factory may ask the gateway for models before pi starts.
+ * Skipped when pi runs offline: `--offline` sets `PI_OFFLINE=1` before extensions load, and pi's
+ * model runtime treats any set `PI_OFFLINE` as offline, so this does too. Skipped as well when
+ * `INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS=0`; a positive value replaces the 5 s default. A skipped
+ * discovery is silent: fallbacks now, pi's saved snapshot on its offline refresh.
+ */
+export function factoryDiscovery(env: Record<string, string | undefined>): { skip: boolean; timeoutMs: number; warnings: string[] } {
+  const warnings: string[] = [];
+  let timeoutMs: number = FACTORY_DISCOVERY_TIMEOUT_MS;
+  const raw = env[ENV.discoveryTimeoutMs]?.trim();
+  if (raw) {
+    const value = /^\d{1,7}$/.test(raw) ? Number(raw) : Number.NaN;
+    if (Number.isSafeInteger(value)) timeoutMs = value;
+    else warnings.push(`${ENV.discoveryTimeoutMs}: must be a whole number of milliseconds (0 skips load-time discovery); using ${FACTORY_DISCOVERY_TIMEOUT_MS}`);
+  }
+  return { skip: env.PI_OFFLINE !== undefined || timeoutMs === 0, timeoutMs, warnings };
+}
+
 /** Discover at load time; on failure fall back to config `fallbackModels` (pi adds its snapshot). */
 export async function initialModels(
   config: GatewayConfig,
@@ -376,7 +396,14 @@ export async function registerGateways(
     ...(deps.readText ? { readText: deps.readText } : {}),
   });
   for (const warning of warnings) warn(`${LOG_PREFIX} ${warning}`);
-  const initial = await Promise.all(providers.map((config) => initialModels(config, deps)));
+  if (providers.length === 0) return [];
+  const discovery = factoryDiscovery(deps.env ?? process.env);
+  for (const warning of discovery.warnings) warn(`${LOG_PREFIX} ${warning}`);
+  const initial = await Promise.all(
+    providers.map((config) =>
+      discovery.skip ? { models: fallbackModels(config), fresh: false } : initialModels(config, deps, discovery.timeoutMs),
+    ),
+  );
   providers.forEach((config, index) => {
     pi.registerProvider(createGatewayProvider(config, initial[index], deps));
   });
