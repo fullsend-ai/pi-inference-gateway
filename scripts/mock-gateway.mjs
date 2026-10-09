@@ -66,7 +66,15 @@ function describeAuth(kind) {
 function authSummary(headers) {
   const names = ["authorization", "x-api-key"].filter((name) => headers[name] !== undefined);
   if (names.length === 0) return "none";
-  return names.map((name) => (name === "authorization" ? `authorization(${String(headers.authorization).split(" ")[0]})` : name)).join(",");
+  return names.map((name) => (name === "authorization" ? `authorization(${authScheme(headers.authorization)})` : name)).join(",");
+}
+
+/** `Basic`, `Bearer` or `unknown` — never any part of the value itself. */
+function authScheme(value) {
+  const scheme = /^(\S+)\s/.exec(String(value))?.[1]?.toLowerCase();
+  if (scheme === "basic") return "Basic";
+  if (scheme === "bearer") return "Bearer";
+  return "unknown";
 }
 
 function readBody(request) {
