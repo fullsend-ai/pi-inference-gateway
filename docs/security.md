@@ -34,7 +34,12 @@ logs. Back to the [README](../README.md).
   repository cannot point your credentials at its own host. An agent that can already change pi's
   process environment can already change every `INFERENCE_GATEWAY_*` variable, so this variable
   adds no new way in. Its purpose is to let a host point pi at a file the agent cannot write, which
-  closes the gap between the host's check of the file and pi's read of it. A provider whose
+  closes the gap between the host's check of the file and pi's read of it. That holds only while
+  the host ensures three things, none of which the extension checks: the file's parent directory is
+  not writable by the agent either (otherwise the agent can replace the file by renaming another
+  over it); neither the file nor any directory on its path is a symlink to a target the agent can
+  write; and every child pi inherits the same `INFERENCE_GATEWAY_CONFIG_FILE` value, since an agent
+  that can start pi with an environment of its own can point it at another file. A provider whose
   `baseUrlEnv` resolves to another URL than `INFERENCE_GATEWAY_BASE_URL` is refused
   `INFERENCE_GATEWAY_*` credentials exactly like a literal `baseUrl`.
 - **No secrets in the file.** Keys and passwords are referenced by variable name or file path; a
