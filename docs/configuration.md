@@ -159,11 +159,11 @@ When it is set, the extension reads **only that file**: not the extension direct
 `~/.pi/agent` or `$PI_CODING_AGENT_DIR`, and no `.local.json` overlay. Point it at a path the agent
 cannot write, and pi and every child pi it starts read the same file the host checked. That holds
 only while the host ensures three things, none of which the extension checks: the file's parent
-directory is not writable by the agent either (otherwise the agent can replace the file by
-renaming another over it); neither the file nor any directory on its path is a symlink to a target
-the agent can write; and every child pi inherits the same `INFERENCE_GATEWAY_CONFIG_FILE` value (an
-agent that can start pi with an environment of its own can point it at another file, see
-[Security](security.md)).
+directory and every directory above it are not writable by the agent either (otherwise the agent
+can replace the file, or a directory containing it, by renaming another over it); neither the file
+nor any directory on its path is a symlink to a target the agent can write; and every child pi
+inherits the same `INFERENCE_GATEWAY_CONFIG_FILE` value (an agent that can start pi with an
+environment of its own can point it at another file, see [Security](security.md)).
 
 - A leading `~/` is expanded. The path must then be absolute; a relative path is reported, naming
   it, and no file is read, since pi's working directory is the agent's repository.
