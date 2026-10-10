@@ -225,6 +225,7 @@ Issue a token, write it to a file, and point a provider's `tokenFile` at that fi
 ```bash
 export PI_CODING_AGENT_DIR=$(mktemp -d)       # throwaway: never touch your real ~/.pi
 unset INFERENCE_GATEWAY_BASE_URL INFERENCE_GATEWAY_API_KEY INFERENCE_GATEWAY_TOKEN_FILE
+unset INFERENCE_GATEWAY_CONFIG_FILE PI_OFFLINE INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS
 token=$(openssl rand -hex 24)                 # stands in for a token from your issuer
 MOCK_GATEWAY_TOKEN=$token node scripts/mock-gateway.mjs 47811 &    # accepts only this token
 (umask 077; printf '%s\n' "$token" > "$PI_CODING_AGENT_DIR/gateway-token")
