@@ -711,11 +711,22 @@ const PAIRED_KEYS: readonly (readonly string[])[] = [
   ["baseUrl", "baseUrlEnv"],
   ["apiKeyEnv", "tokenFile"],
   ["passwordEnv", "passwordFile"],
+  ["username", "usernameEnv"],
 ];
+
+/**
+ * Credential files of a lower layer are bound to the destination it named: a higher layer that
+ * sets `baseUrl` or `baseUrlEnv` drops them unless it sets them again. Inherited variable names
+ * (`apiKeyEnv`, `passwordEnv`, `usernameEnv`) stay, so an overlay that only swaps the URL keeps working.
+ */
+const DESTINATION_BOUND_KEYS: readonly string[] = ["tokenFile", "passwordFile"];
 
 function mergeProviderEntry(base: unknown, over: unknown): unknown {
   if (!isRecord(base) || !isRecord(over)) return over;
-  const replaced = PAIRED_KEYS.filter((pair) => pair.some((key) => Object.hasOwn(over, key))).flat();
+  const replaced = [
+    ...PAIRED_KEYS.filter((pair) => pair.some((key) => Object.hasOwn(over, key))).flat(),
+    ...(Object.hasOwn(over, "baseUrl") || Object.hasOwn(over, "baseUrlEnv") ? DESTINATION_BOUND_KEYS : []),
+  ];
   const kept = Object.entries(base).filter(([key]) => !replaced.includes(key));
   const merged = Object.entries(over).map(([key, value]): [string, unknown] => {
     const prior = ownValue(base, key);
@@ -730,7 +741,8 @@ function mergeProviderEntry(base: unknown, over: unknown): unknown {
  * provider, then per model id. A key set to an object in both (`headers`, `authHeader`, a model's
  * `compat`, `thinkingLevelMap` or `cost`) is merged one level deep; any other overlay value
  * replaces the shared one. Each pair counts as one key: `baseUrl`/`baseUrlEnv`,
- * `apiKeyEnv`/`tokenFile` and `passwordEnv`/`passwordFile`.
+ * `apiKeyEnv`/`tokenFile`, `passwordEnv`/`passwordFile` and `username`/`usernameEnv`. An overlay that
+ * sets `baseUrl` or `baseUrlEnv` also drops the shared `tokenFile` and `passwordFile` unless it sets them.
  */
 export function mergeConfigOverlay(shared: Record<string, unknown>, overlay: Record<string, unknown>): Record<string, unknown> {
   return mergeEach(shared, overlay, mergeProviderEntry);
@@ -827,8 +839,10 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
 /**
  * Combine the env provider with the file's providers. A file entry with the env provider's id is
  * merged: the environment supplies the connection (base URL, credentials, default API) and the file
- * keeps everything else (headers, filters, fallback models). Auth-header overrides and models are
- * merged per key; for a model both name, the file's fields win over the env's bare `id=api`.
+ * keeps everything else (headers, filters, fallback models). When the file's base URL differs from the
+ * environment's, the file's `tokenFile` and `passwordFile` are dropped too: they belonged to the other
+ * URL. Auth-header overrides and models are merged per key; for a model both name, the file's fields
+ * win over the env's bare `id=api`.
  * `sources` maps a provider id to the file(s) its entry came from; a warning about that entry is
  * prefixed with it.
  */
@@ -849,16 +863,20 @@ export function mergeProviders(
       merged.set(provider.id, provider);
       continue;
     }
-    if (file.baseUrl !== provider.baseUrl) {
+    const urlDiffers = file.baseUrl !== provider.baseUrl;
+    if (urlDiffers) {
       const source = sources?.get(file.id);
       // Name the key the user wrote; for baseUrlEnv, the variable only, never its value.
       const fileSetting =
         file.baseUrlEnv !== undefined
           ? `providers.${file.id}.baseUrlEnv (${file.baseUrlEnv})`
           : `providers.${file.id}.baseUrl (${file.baseUrl})`;
+      // The file's credential files were bound to its base URL, so they go with it (key names only).
+      const dropped = (["tokenFile", "passwordFile"] as const).filter((key) => file[key] !== undefined && provider[key] === undefined);
       warnings.push(
-        `${source ? `${source}: ` : ""}${fileSetting} is ignored: ${ENV.baseUrl} (${provider.baseUrl}) configures this provider; ` +
-          `remove one of them, or give the file entry another id`,
+        `${source ? `${source}: ` : ""}${fileSetting} is ignored: ${ENV.baseUrl} (${provider.baseUrl}) configures this provider` +
+          (dropped.length > 0 ? `, so its ${dropped.join(" and ")} ${dropped.length > 1 ? "are" : "is"} ignored too` : "") +
+          `; remove one of them, or give the file entry another id`,
       );
     }
     // The base URL now comes from the environment, so the file's baseUrlEnv no longer describes it.
@@ -867,10 +885,10 @@ export function mergeProviders(
       ...fileRest,
       baseUrl: provider.baseUrl,
       apiKeyEnv: provider.apiKeyEnv,
-      tokenFile: provider.tokenFile ?? file.tokenFile,
+      tokenFile: provider.tokenFile ?? (urlDiffers ? undefined : file.tokenFile),
       usernameEnv: provider.usernameEnv,
       passwordEnv: provider.passwordEnv,
-      passwordFile: provider.passwordFile ?? file.passwordFile,
+      passwordFile: provider.passwordFile ?? (urlDiffers ? undefined : file.passwordFile),
       // Whether the variable was *supplied* decides, not its value: an explicit
       // INFERENCE_GATEWAY_DEFAULT_API=openai-responses must beat a file's openai-completions.
       defaultApi: envDefaultApiSet ? provider.defaultApi : file.defaultApi,

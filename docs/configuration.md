@@ -65,7 +65,10 @@ For several gateways, per-model overrides or models the gateway does not list, a
 
 When `INFERENCE_GATEWAY_BASE_URL` is also set, it configures the provider with the same id
 (`gateway` by default): the environment supplies the base URL, key and default API; the file adds the
-rest. No `!command` keys and no shell-out, by design.
+rest. If the file entry's base URL differs from the environment's, its `tokenFile` and `passwordFile`
+are dropped too (with a warning naming them), since they belonged to the other URL; when the two
+agree, for example a file entry with `"baseUrlEnv": "INFERENCE_GATEWAY_BASE_URL"`, they are kept.
+No `!command` keys and no shell-out, by design.
 
 ## Sharing the config file
 
@@ -79,11 +82,15 @@ everything machine-specific out of it:
 - **`inference-gateway.local.json`**, in the same directory (`~/.pi/agent`, or
   `$PI_CODING_AGENT_DIR`), is merged over the shared file per provider and per model. An overlay
   value replaces the shared one, except that two objects (`headers`, `authHeader`, a model's
-  `compat`, `thinkingLevelMap` or `cost`) are merged key by key. Three pairs each count as one
-  setting: `baseUrl`/`baseUrlEnv`, `apiKeyEnv`/`tokenFile` and `passwordEnv`/`passwordFile`.
-  Setting either key of a pair in the overlay replaces both, so a shared `tokenFile` never follows
-  a local `baseUrl` and `apiKeyEnv` to another gateway. A missing overlay is silent; a malformed or
-  unreadable one is reported with its own path and then ignored, so the shared file applies alone.
+  `compat`, `thinkingLevelMap` or `cost`) are merged key by key. Four pairs each count as one
+  setting: `baseUrl`/`baseUrlEnv`, `apiKeyEnv`/`tokenFile`, `passwordEnv`/`passwordFile` and
+  `username`/`usernameEnv`. Setting either key of a pair in the overlay replaces both, so a literal
+  local `username` wins over a shared `usernameEnv`. An overlay that sets `baseUrl` or `baseUrlEnv`
+  also drops the shared `tokenFile` and `passwordFile` unless it sets them again, so a shared
+  credential file never follows a local URL to another gateway. Inherited variable names
+  (`apiKeyEnv`, `passwordEnv`, `usernameEnv`) are kept, so an overlay that only swaps the URL and
+  uses variables keeps working. A missing overlay is silent; a malformed or unreadable one is
+  reported with its own path and then ignored, so the shared file applies alone.
 
 Shared file, safe to publish:
 
@@ -137,10 +144,6 @@ env provider's id (`gateway`, or `INFERENCE_GATEWAY_PROVIDER_ID`) and
 another gateway, use `baseUrlEnv` and `apiKeyEnv`. The same rules apply as for any config file:
 `INFERENCE_GATEWAY_*` credentials still only go to `INFERENCE_GATEWAY_BASE_URL` (see
 [Security](security.md)), and warnings name the file they came from.
-
-Credential keys are merged one by one, like every other key. So a `tokenFile` or `passwordFile`
-in a shipped file carries over even when a user-level file sets another `baseUrl` with `apiKeyEnv`
-or `passwordEnv`, and `tokenFile` is read first. Leave file credentials out of a shipped config.
 
 ## Auth
 
