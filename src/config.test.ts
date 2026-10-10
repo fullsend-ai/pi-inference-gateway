@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CONFIG_FILE_NAME,
@@ -1276,6 +1277,178 @@ describe("config shipped in the extension directory", () => {
       },
     });
     assert.deepEqual(seen, [EXT_SHARED, EXT_LOCAL]);
+  });
+});
+
+describe("INFERENCE_GATEWAY_CONFIG_FILE", () => {
+  const EXT = "/opt/pi/extensions/inference-gateway";
+  const NAMED = "/run/host/inference-gateway.json";
+  const DIRECTORY_FILES = [
+    `${EXT}/${CONFIG_FILE_NAME}`,
+    `${EXT}/${LOCAL_CONFIG_FILE_NAME}`,
+    `${HOME}/.pi/agent/${CONFIG_FILE_NAME}`,
+    `${HOME}/.pi/agent/${LOCAL_CONFIG_FILE_NAME}`,
+  ];
+  const entry = (id: string) => JSON.stringify({ providers: { [id]: { baseUrl: `https://${id}.example.com` } } });
+  /** Every directory layer holds a provider of its own; `extra` adds or replaces files. */
+  const reader = (extra: Record<string, string>, seen: string[] = []) => {
+    const contents: Record<string, string> = {
+      ...Object.fromEntries(DIRECTORY_FILES.map((file, index) => [file, entry(`layer${index}`)])),
+      ...extra,
+    };
+    return async (path: string): Promise<string | undefined> => {
+      seen.push(path);
+      return Object.hasOwn(contents, path) ? contents[path] : undefined;
+    };
+  };
+  const load = (env: Record<string, string>, readText: (path: string) => Promise<string | undefined>) =>
+    loadConfig({ env, home: HOME, extensionDir: EXT, readText });
+  const ids = (providers: { id: string }[]) => providers.map((provider) => provider.id);
+
+  it("reads only the named file: no directory file and no overlay", async () => {
+    const seen: string[] = [];
+    const result = await load({ INFERENCE_GATEWAY_CONFIG_FILE: NAMED }, reader({ [NAMED]: entry("named") }, seen));
+    assert.deepEqual(seen, [NAMED]);
+    assert.deepEqual(result.warnings, []);
+    assert.deepEqual(ids(result.providers), ["named"]);
+    assert.equal(result.path, NAMED);
+  });
+
+  it("ignores PI_CODING_AGENT_DIR's files too", async () => {
+    const seen: string[] = [];
+    const agent = "/tmp/agent";
+    const result = await load(
+      { INFERENCE_GATEWAY_CONFIG_FILE: NAMED, PI_CODING_AGENT_DIR: agent },
+      reader({ [NAMED]: entry("named"), [`${agent}/${CONFIG_FILE_NAME}`]: entry("agent") }, seen),
+    );
+    assert.deepEqual(seen, [NAMED]);
+    assert.deepEqual(ids(result.providers), ["named"]);
+  });
+
+  it("reports a missing file by its path and does not fall back to the directory layers", async () => {
+    const seen: string[] = [];
+    const result = await load({ INFERENCE_GATEWAY_CONFIG_FILE: NAMED }, reader({}, seen));
+    assert.deepEqual(seen, [NAMED]);
+    assert.deepEqual(result.providers, []);
+    assert.equal(result.warnings.length, 1);
+    assert.ok(result.warnings[0].startsWith(`${NAMED}: `), result.warnings[0]);
+    assert.match(result.warnings[0], /INFERENCE_GATEWAY_CONFIG_FILE/);
+  });
+
+  it("reports an unreadable file by its path and does not fall back", async () => {
+    const result = await load({ INFERENCE_GATEWAY_CONFIG_FILE: NAMED }, async (path) => {
+      if (path === NAMED) throw new Error("EACCES: permission denied");
+      return entry("fallback");
+    });
+    assert.deepEqual(result.providers, []);
+    assert.equal(result.warnings.length, 1);
+    assert.ok(result.warnings[0].startsWith(`${NAMED}: `), result.warnings[0]);
+    assert.match(result.warnings[0], /EACCES/);
+  });
+
+  it("reports a malformed file by its path, without its content, and does not fall back", async () => {
+    for (const bad of ['{ "providers": { "corp": { "apiKeyEnv": "CORP_KEY" oops', "[]", JSON.stringify({ corp: {} })]) {
+      const result = await load({ INFERENCE_GATEWAY_CONFIG_FILE: NAMED }, reader({ [NAMED]: bad }));
+      assert.deepEqual(result.providers, [], bad);
+      assert.equal(result.warnings.length, 1, bad);
+      assert.ok(result.warnings[0].startsWith(`${NAMED}: `), result.warnings[0]);
+      assert.equal(result.warnings[0].includes("CORP_KEY"), false, result.warnings[0]);
+    }
+  });
+
+  it("refuses a relative path, naming it, and reads nothing", async () => {
+    for (const relative of ["inference-gateway.json", "./cfg/inference-gateway.json", "~other/inference-gateway.json"]) {
+      const seen: string[] = [];
+      const result = await load({ INFERENCE_GATEWAY_CONFIG_FILE: relative }, reader({}, seen));
+      assert.deepEqual(seen, [], relative);
+      assert.deepEqual(result.providers, [], relative);
+      assert.equal(result.warnings.length, 1, relative);
+      assert.ok(result.warnings[0].startsWith("INFERENCE_GATEWAY_CONFIG_FILE: "), result.warnings[0]);
+      assert.ok(result.warnings[0].includes(JSON.stringify(relative)), result.warnings[0]);
+    }
+  });
+
+  it("expands a leading ~/", async () => {
+    const seen: string[] = [];
+    const expanded = `${HOME}/cfg/inference-gateway.json`;
+    const result = await load({ INFERENCE_GATEWAY_CONFIG_FILE: "~/cfg/inference-gateway.json" }, reader({ [expanded]: entry("named") }, seen));
+    assert.deepEqual(seen, [expanded]);
+    assert.deepEqual(ids(result.providers), ["named"]);
+    assert.equal(result.path, expanded);
+  });
+
+  it("still loads the env provider next to the file, merged and bound as before", async () => {
+    const named = JSON.stringify({
+      providers: {
+        gateway: { baseUrlEnv: "INFERENCE_GATEWAY_BASE_URL", exclude: ["*embed*"] },
+        corp: { baseUrl: "https://corp.example.com", apiKeyEnv: "CORP_KEY" },
+        other: { baseUrl: "https://elsewhere.example.com", apiKeyEnv: "INFERENCE_GATEWAY_API_KEY" },
+      },
+    });
+    const result = await load(
+      { INFERENCE_GATEWAY_CONFIG_FILE: NAMED, INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com", INFERENCE_GATEWAY_API_KEY: "k" },
+      reader({ [NAMED]: named }),
+    );
+    assert.deepEqual(ids(result.providers).sort(), ["corp", "gateway"]);
+    const gateway = result.providers.find((provider) => provider.id === "gateway");
+    assert.equal(gateway?.baseUrl, "https://gw.example.com");
+    assert.equal(gateway?.apiKeyEnv, "INFERENCE_GATEWAY_API_KEY");
+    assert.deepEqual(gateway?.exclude, ["*embed*"]);
+    assert.equal(result.warnings.length, 1);
+    assert.match(result.warnings[0], /other: refused .*INFERENCE_GATEWAY_API_KEY/);
+  });
+
+  it("keeps the env provider when the named file is missing", async () => {
+    const result = await load(
+      { INFERENCE_GATEWAY_CONFIG_FILE: NAMED, INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com" },
+      reader({}),
+    );
+    assert.deepEqual(ids(result.providers), ["gateway"]);
+    assert.equal(result.warnings.length, 1);
+    assert.ok(result.warnings[0].startsWith(`${NAMED}: `), result.warnings[0]);
+  });
+
+  it("validates the file as before, refusing a literal credential", async () => {
+    const named = JSON.stringify({
+      providers: { a: { baseUrl: "https://a.example.com", apiKey: "secret" }, b: { baseUrl: "https://b.example.com" } },
+    });
+    const result = await load({ INFERENCE_GATEWAY_CONFIG_FILE: NAMED }, reader({ [NAMED]: named }));
+    assert.deepEqual(ids(result.providers), ["b"]);
+    assert.equal(result.warnings.length, 1);
+    assert.ok(result.warnings[0].startsWith(`${NAMED}: providers.a`), result.warnings[0]);
+    assert.equal(result.warnings[0].includes("secret"), false, result.warnings[0]);
+  });
+
+  it("changes nothing when unset, empty or blank", async () => {
+    const seen: string[] = [];
+    const baseline = await load({}, reader({}, seen));
+    assert.deepEqual(seen, DIRECTORY_FILES);
+    assert.deepEqual(ids(baseline.providers), ["layer0", "layer1", "layer2", "layer3"]);
+    for (const value of ["", "  "]) {
+      const again: string[] = [];
+      const result = await load({ INFERENCE_GATEWAY_CONFIG_FILE: value }, reader({}, again));
+      assert.deepEqual(result, baseline, JSON.stringify(value));
+      assert.deepEqual(again, DIRECTORY_FILES, JSON.stringify(value));
+    }
+  });
+
+  it("reads the named file from disk with the default reader, and reports a missing one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "inference-gateway-"));
+    try {
+      const path = join(dir, "config.json");
+      writeFileSync(path, entry("disk"));
+      const found = await loadConfig({ env: { INFERENCE_GATEWAY_CONFIG_FILE: path }, home: HOME });
+      assert.deepEqual(found.warnings, []);
+      assert.deepEqual(ids(found.providers), ["disk"]);
+
+      const missingPath = join(dir, "missing.json");
+      const missing = await loadConfig({ env: { INFERENCE_GATEWAY_CONFIG_FILE: missingPath }, home: HOME });
+      assert.deepEqual(missing.providers, []);
+      assert.equal(missing.warnings.length, 1);
+      assert.ok(missing.warnings[0].startsWith(`${missingPath}: `), missing.warnings[0]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

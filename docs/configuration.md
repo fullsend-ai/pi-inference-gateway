@@ -19,6 +19,7 @@ every variable, the config file, auth and model-list behaviour. Back to the [REA
 | `INFERENCE_GATEWAY_DISCOVERY` | Model-list formats to request, comma-separated: `openai`, `anthropic` (see [Discovery: both list formats](#discovery-both-list-formats)). | `openai,anthropic` |
 | `INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS` | How long pi's startup waits for the model list; `0` skips it (see [When the model list changes](#when-the-model-list-changes)). | `5000` |
 | `INFERENCE_GATEWAY_SESSION_AFFINITY` | `1` sends a hashed session id for gateway affinity and caching (see [Session affinity](#session-affinity)). | off |
+| `INFERENCE_GATEWAY_CONFIG_FILE` | Absolute path (`~/` allowed) of the only config file to read, instead of every directory file. For hosts that render and verify the config themselves (see [One exact config file](#one-exact-config-file)). | — |
 
 No `pi login`: auth is ambient. Without a key or token file the gateway's models are registered but
 not offered.
@@ -144,6 +145,32 @@ env provider's id (`gateway`, or `INFERENCE_GATEWAY_PROVIDER_ID`) and
 another gateway, use `baseUrlEnv` and `apiKeyEnv`. The same rules apply as for any config file:
 `INFERENCE_GATEWAY_*` credentials still only go to `INFERENCE_GATEWAY_BASE_URL` (see
 [Security](security.md)), and warnings name the file they came from.
+
+## One exact config file
+
+A host that renders and verifies the config itself, then starts pi, can name that file with
+`INFERENCE_GATEWAY_CONFIG_FILE`:
+
+```bash
+export INFERENCE_GATEWAY_CONFIG_FILE=/run/host/inference-gateway.json
+```
+
+When it is set, the extension reads **only that file**: not the extension directory's files, not
+`~/.pi/agent` or `$PI_CODING_AGENT_DIR`, and no `.local.json` overlay. Point it at a path the agent
+cannot write, and pi and every child pi it starts read the same file the host checked.
+
+- A leading `~/` is expanded. The path must then be absolute; a relative path is reported, naming
+  it, and no file is read, since pi's working directory is the agent's repository.
+- A missing, unreadable or malformed file is reported with its path and is not used. The extension
+  does not fall back to the directory files.
+- The file has the same format and validation as any config file, literal credentials refused
+  included.
+- Only the file layers are replaced. The provider built from `INFERENCE_GATEWAY_BASE_URL` and the
+  other variables still loads and merges with the file's providers as described in
+  [Config file](#config-file), even when the named file cannot be used, and `INFERENCE_GATEWAY_*`
+  credentials still only go to `INFERENCE_GATEWAY_BASE_URL`.
+
+Unset or empty, nothing changes. See [Security](security.md) for the trust model.
 
 ## Auth
 

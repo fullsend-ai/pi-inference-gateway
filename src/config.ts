@@ -4,7 +4,7 @@
 
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { validateCompat } from "./compat.ts";
@@ -123,6 +123,7 @@ export const ENV = {
   discoveryTimeoutMs: "INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS",
   discovery: "INFERENCE_GATEWAY_DISCOVERY",
   sessionAffinity: "INFERENCE_GATEWAY_SESSION_AFFINITY",
+  configFile: "INFERENCE_GATEWAY_CONFIG_FILE",
 } as const;
 
 /** `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitive; anything else is undefined. */
@@ -299,7 +300,8 @@ export function expandHome(path: string, home: string): string {
 /**
  * The directory this extension is installed in (next to `package.json`, the parent of `src/`). A
  * config file there ships with the extension, so it carries the extension's own integrity: no
- * environment variable can point the extension at another file.
+ * environment variable selects another directory. Only INFERENCE_GATEWAY_CONFIG_FILE, set by the
+ * host, replaces every directory file with one exact file.
  */
 export const EXTENSION_DIR: string = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -928,11 +930,15 @@ async function readTextIfExists(path: string): Promise<string | undefined> {
   }
 }
 
-/** A config file's `providers` object; undefined (with a warning naming the file unless it is missing). */
+/**
+ * A config file's `providers` object; undefined (with a warning naming the file unless it is missing
+ * and not `required`).
+ */
 async function readProviders(
   path: string,
   readText: (path: string) => Promise<string | undefined>,
   warnings: string[],
+  required = false,
 ): Promise<Record<string, unknown> | undefined> {
   let text: string | undefined;
   try {
@@ -941,7 +947,10 @@ async function readProviders(
     warnings.push(`${path}: ${error instanceof Error ? error.message : String(error)}`);
     return undefined;
   }
-  if (text === undefined) return undefined;
+  if (text === undefined) {
+    if (required) warnings.push(`${path}: no such file (named by ${ENV.configFile})`);
+    return undefined;
+  }
   let json: unknown;
   try {
     json = JSON.parse(text);
@@ -958,35 +967,60 @@ async function readProviders(
 }
 
 /**
- * Everything the extension needs to decide what to register. No providers and no warnings means
- * "not configured": the extension stays silent.
+ * The config files to read, lowest precedence first, and the one reported as `path`.
  *
- * Config files, lowest precedence first, each merged over the ones before it (mergeConfigOverlay):
- * the extension directory's `inference-gateway.json` and `.local.json`, then the agent directory's.
+ * INFERENCE_GATEWAY_CONFIG_FILE, when set and non-empty, names the only file: no directory file and
+ * no `.local.json` overlay is read, and the file must exist (`required`), since a host that sets it
+ * relies on that exact file. A leading `~/` is expanded; anything still relative is refused with a
+ * warning and nothing is read, because pi's working directory is the agent's repository.
  */
-export async function loadConfig(deps: LoadConfigDeps = {}): Promise<ParseResult & { path: string }> {
-  const env = deps.env ?? process.env;
-  const home = deps.home ?? homedir();
-  const readText = deps.readText ?? readTextIfExists;
-  const extensionDir = deps.extensionDir ?? (deps.readText ? undefined : EXTENSION_DIR);
+function configFiles(
+  env: Record<string, string | undefined>,
+  home: string,
+  extensionDir: string | undefined,
+  warnings: string[],
+): { path: string; paths: string[]; required: boolean } {
+  const named = env[ENV.configFile]?.trim();
+  if (named) {
+    const path = expandHome(named, home);
+    if (isAbsolute(path)) return { path, paths: [path], required: true };
+    warnings.push(`${ENV.configFile}: ${JSON.stringify(named)} is not an absolute path; no config file is read`);
+    return { path, paths: [], required: true };
+  }
   const dir = agentDir(env, home);
   const path = join(dir, CONFIG_FILE_NAME);
-  const localPath = join(dir, LOCAL_CONFIG_FILE_NAME);
   const paths = [
     // The same directory twice would only repeat every file name in its warnings.
     ...(extensionDir !== undefined && resolve(extensionDir) !== resolve(dir)
       ? [join(extensionDir, CONFIG_FILE_NAME), join(extensionDir, LOCAL_CONFIG_FILE_NAME)]
       : []),
     path,
-    localPath,
+    join(dir, LOCAL_CONFIG_FILE_NAME),
   ];
+  return { path, paths, required: false };
+}
+
+/**
+ * Everything the extension needs to decide what to register. No providers and no warnings means
+ * "not configured": the extension stays silent.
+ *
+ * Config files, lowest precedence first, each merged over the ones before it (mergeConfigOverlay):
+ * the extension directory's `inference-gateway.json` and `.local.json`, then the agent directory's.
+ * With INFERENCE_GATEWAY_CONFIG_FILE set, that one file replaces all of them (see configFiles).
+ */
+export async function loadConfig(deps: LoadConfigDeps = {}): Promise<ParseResult & { path: string }> {
+  const env = deps.env ?? process.env;
+  const home = deps.home ?? homedir();
+  const readText = deps.readText ?? readTextIfExists;
+  const extensionDir = deps.extensionDir ?? (deps.readText ? undefined : EXTENSION_DIR);
 
   const fromEnv = envProvider(env, home);
   const fromFile: ParseResult = { providers: [], warnings: [] };
+  const { path, paths, required } = configFiles(env, home, extensionDir, fromFile.warnings);
   const sources = new Map<string, string>();
   const files: Array<[string, Record<string, unknown>]> = [];
   for (const file of paths) {
-    const providers = await readProviders(file, readText, fromFile.warnings);
+    const providers = await readProviders(file, readText, fromFile.warnings, required);
     if (providers) files.push([file, providers]);
   }
   const combined = files.reduce<Record<string, unknown>>((merged, [, providers]) => mergeConfigOverlay(merged, providers), {});
