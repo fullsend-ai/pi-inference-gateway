@@ -28,10 +28,15 @@ logs. Back to the [README](../README.md).
   overlay `inference-gateway.local.json`, or the same files under `$PI_CODING_AGENT_DIR`, merged
   over the same two files in the extension's own install directory (see
   [Shipping a config with the extension](configuration.md#shipping-a-config-with-the-extension)).
-  No variable points the extension at another config file. A project's
-  `.pi/` directory is never consulted, so a cloned repository cannot point your credentials at its
-  own host. A provider whose `baseUrlEnv` resolves to another URL than `INFERENCE_GATEWAY_BASE_URL`
-  is refused `INFERENCE_GATEWAY_*` credentials exactly like a literal `baseUrl`.
+  When `INFERENCE_GATEWAY_CONFIG_FILE` is set, only the file it names is read, none of those (see
+  [One exact config file](configuration.md#one-exact-config-file)). The host that starts pi sets it
+  in the process environment. A project's `.pi/` directory is still never consulted, so a cloned
+  repository cannot point your credentials at its own host. An agent that can already change pi's
+  process environment can already change every `INFERENCE_GATEWAY_*` variable, so this variable
+  adds no new way in. Its purpose is to let a host point pi at a file the agent cannot write, which
+  closes the gap between the host's check of the file and pi's read of it. A provider whose
+  `baseUrlEnv` resolves to another URL than `INFERENCE_GATEWAY_BASE_URL` is refused
+  `INFERENCE_GATEWAY_*` credentials exactly like a literal `baseUrl`.
 - **No secrets in the file.** Keys and passwords are referenced by variable name or file path; a
   literal `apiKey` or `password`, or an `authorization`/`x-api-key` entry in `headers`, is refused.
   No `!command` keys, no shell-out.
