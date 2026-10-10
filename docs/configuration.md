@@ -52,7 +52,7 @@ For several gateways, per-model overrides or models the gateway does not list, a
 | Key | Meaning |
 |---|---|
 | `baseUrl` / `baseUrlEnv` | Gateway root, or the *name* of the variable holding it (see [Sharing the config file](#sharing-the-config-file)). Exactly one is required. |
-| `apiKeyEnv` / `tokenFile` | *Name* of the variable holding the key, or a path (`~/` allowed) re-read per request. A literal `apiKey`, or an `authorization`/`x-api-key` entry in `headers`, is refused. |
+| `apiKeyEnv` / `tokenFile` | *Name* of the variable holding the key, or a path (`~/` allowed) re-read per request. A literal `apiKey`, or an `authorization`/`x-api-key` entry in `headers`, is refused. See the [token file walkthrough](#token-file-walkthrough). |
 | `username` / `usernameEnv`, `passwordEnv` / `passwordFile` | Basic-auth credentials (a literal `password` is refused). |
 | `authHeader` | See [Auth headers](#auth). |
 | `defaultApi` | As `INFERENCE_GATEWAY_DEFAULT_API`; see [Which API to pick](routing.md#which-api-to-pick). |
@@ -211,6 +211,93 @@ Basic auth reads its username from `INFERENCE_GATEWAY_BASIC_USER` (config: `user
 `INFERENCE_GATEWAY_BASIC_PASSWORD_FILE` (config: `passwordEnv` / `passwordFile`, re-read per request). A
 username containing `:` is refused. The key pi itself passes around is never sent: the header always
 comes from the configured credentials.
+
+## Token file walkthrough
+
+A token file suits short-lived tokens, such as a CI runner's OIDC token minted with the gateway's
+audience. Whatever writes the file, the extension reads it again on every request, so pi picks up a
+new token without a restart. This walkthrough uses the mock gateway in this repo (see
+[Try it locally](../CONTRIBUTING.md#try-it-locally)) in place of a real issuer and gateway; run it
+from a checkout after `npm ci`.
+
+Issue a token, write it to a file, and point a provider's `tokenFile` at that file:
+
+```bash
+export PI_CODING_AGENT_DIR=$(mktemp -d)       # throwaway: never touch your real ~/.pi
+unset INFERENCE_GATEWAY_BASE_URL INFERENCE_GATEWAY_API_KEY INFERENCE_GATEWAY_TOKEN_FILE
+token=$(openssl rand -hex 24)                 # stands in for a token from your issuer
+MOCK_GATEWAY_TOKEN=$token node scripts/mock-gateway.mjs 47811 &    # accepts only this token
+(umask 077; printf '%s\n' "$token" > "$PI_CODING_AGENT_DIR/gateway-token")
+unset token
+cat > "$PI_CODING_AGENT_DIR/inference-gateway.json" <<EOF
+{ "providers": { "gateway": { "baseUrl": "http://127.0.0.1:47811",
+  "tokenFile": "$PI_CODING_AGENT_DIR/gateway-token" } } }
+EOF
+```
+
+The here-document is unquoted, so the config file gets the token file's absolute path; it never
+holds the token itself. List the models and run one prompt:
+
+```console
+$ pi -ne -e . --list-models | grep -E '^(provider|gateway) |pi-inference-gateway'
+provider  model                     context  max-out  thinking  images
+gateway   claude-sonnet-5           1M       128K     yes       yes
+gateway   gemini-3.5-flash          1.0M     65.5K    yes       yes
+$ pi -ne -e . --no-session -p --model gateway/claude-sonnet-5 "say hi" </dev/null
+hi from /v1/messages as claude-sonnet-5
+```
+
+The mock logs `authorization(Bearer)` on the OpenAI-format list and `x-api-key` on the
+Anthropic-format list and on `/v1/messages`: the token goes out in each target's native header (see
+[Auth](#auth)). A gateway that reads the token from `Authorization: Bearer` on every path, as
+[agentgateway](gateways/agentgateway.md#extension-side) does, needs `"authHeader": "bearer"` in the
+entry.
+
+- Whitespace around the token, the trailing newline included, is trimmed.
+- While the file is missing or empty, the models are not offered (see
+  [Troubleshooting](troubleshooting.md), `token file ... is missing or empty`).
+- Without a config file, `INFERENCE_GATEWAY_TOKEN_FILE=<path>` next to `INFERENCE_GATEWAY_BASE_URL`
+  does the same for the `gateway` provider.
+
+## A gateway that validates the JWT
+
+When the gateway validates the bearer JWT itself (a CI OIDC token in `tokenFile`, checked against
+the issuer's keys, as agentgateway's `jwtAuth` does; see
+[agentgateway](gateways/agentgateway.md#gateway-side-must-haves)), three things matter outside the
+extension:
+
+- **Turn off a platform IAM check in front of the gateway.** Each request carries exactly one auth
+  header, here `authorization: Bearer <JWT>`. A hosting platform that runs its own IAM check on the
+  `Authorization` header before the request reaches the gateway rejects a token it did not issue,
+  so the gateway never sees it. Turn that check off for the gateway's service: on Cloud Run, deploy
+  it with `--no-invoker-iam-check`. The gateway's own validation is then the only check, so make it
+  refuse requests without a valid token (agentgateway: `jwtAuth.mode: strict`).
+- **Strip a client `x-api-key` at the gateway**, so that a client still on pi's native Messages
+  scheme, or any other client sending one, cannot have that value (possibly the JWT) forwarded to
+  the model provider. In agentgateway's `llm:` mode, per model:
+
+  ```yaml
+  llm:
+    models:
+    - name: claude-sonnet-5
+      provider: anthropic
+      requestHeaders:
+        remove: [x-api-key]
+  ```
+
+  (`llm.models[].requestHeaders` in agentgateway at commit `f112c57e`.)
+- **`models[id].api` belongs to the provider entry**, so it applies to every caller that uses the
+  entry, for example everyone given the same shipped config or `INFERENCE_GATEWAY_CONFIG_FILE`. A
+  caller that needs another API for the same model needs an entry of its own: a second provider id
+  with the same `baseUrl`, used as `gateway-chat/<id>`:
+
+  ```json
+  { "providers": {
+    "gateway": { "baseUrl": "https://gateway.example.com", "tokenFile": "/path/to/oidc-token",
+      "authHeader": "bearer", "models": { "oss/zai-org/glm-5-3": { "api": "openai-responses" } } },
+    "gateway-chat": { "baseUrl": "https://gateway.example.com", "tokenFile": "/path/to/oidc-token",
+      "authHeader": "bearer", "models": { "oss/zai-org/glm-5-3": { "api": "openai-completions" } } } } }
+  ```
 
 ## Discovery: both list formats
 
