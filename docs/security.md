@@ -20,7 +20,10 @@ logs. Back to the [README](../README.md).
   gateway   gemini-3.5-flash          1.0M     65.5K    yes       yes
   ```
 
-  Give any other gateway a variable of its own (`apiKeyEnv`, `passwordEnv`).
+  Give any other gateway a variable of its own (`apiKeyEnv`, `passwordEnv`). An overlay that changes
+  a provider's URL keeps the `apiKeyEnv`, `passwordEnv` and `usernameEnv` it inherits from the
+  shared file, so if the new gateway needs a different credential, set its own variable in the
+  overlay.
 - **Only your user-level config is read**: `~/.pi/agent/inference-gateway.json` and its local
   overlay `inference-gateway.local.json`, or the same files under `$PI_CODING_AGENT_DIR`, merged
   over the same two files in the extension's own install directory (see
