@@ -46,7 +46,15 @@ async function startMock(lines: string[]): Promise<{ child: ChildProcess; baseUr
   collect(child.stdout);
   collect(child.stderr);
   const baseUrl = await new Promise<string>((resolveUrl, reject) => {
-    const timer = setTimeout(() => reject(new Error(`mock gateway did not start: ${lines.join(" | ")}`)), 10_000);
+    // Every failure path stops both timers and the child, so a mock that never starts cannot keep
+    // the test process alive.
+    const fail = (error: Error) => {
+      clearInterval(poll);
+      clearTimeout(timer);
+      child.kill();
+      reject(error);
+    };
+    const timer = setTimeout(() => fail(new Error(`mock gateway did not start: ${lines.join(" | ")}`)), 10_000);
     const poll = setInterval(() => {
       const url = lines.map((line) => /listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(line)?.[1]).find(Boolean);
       if (!url) return;
@@ -54,13 +62,11 @@ async function startMock(lines: string[]): Promise<{ child: ChildProcess; baseUr
       clearTimeout(timer);
       resolveUrl(url);
     }, 20);
-    child.once("exit", (code) => {
-      clearInterval(poll);
-      clearTimeout(timer);
-      reject(new Error(`mock gateway exited (${code}): ${lines.join(" | ")}`));
-    });
+    child.once("exit", (code) => fail(new Error(`mock gateway exited (${code}): ${lines.join(" | ")}`)));
+    child.once("error", (error) => fail(new Error(`mock gateway failed to start: ${error.message}`)));
   });
   child.removeAllListeners("exit");
+  child.removeAllListeners("error");
   return { child, baseUrl };
 }
 
@@ -72,6 +78,7 @@ async function startMock(lines: string[]): Promise<{ child: ChildProcess; baseUr
 function refresher(tokenFile: string) {
   const minted: string[] = [];
   let timer: NodeJS.Timeout | undefined;
+  let rotating: Promise<void> = Promise.resolve();
   let writes = 0;
   const rotate = async () => {
     const token = `ttl-${Date.now() + TTL_MS}-${randomBytes(12).toString("hex")}`;
@@ -85,9 +92,17 @@ function refresher(tokenFile: string) {
     minted,
     rotate,
     start: () => {
-      timer = setInterval(() => void rotate(), REFRESH_MS);
+      // Rotations are chained, so a slow write cannot rename an older token over a newer one, and
+      // a failed write fails the test at stop() instead of surfacing as an unhandled rejection.
+      timer = setInterval(() => {
+        rotating = rotating.then(async () => void (await rotate()));
+      }, REFRESH_MS);
     },
-    stop: () => clearInterval(timer),
+    /** Stops the interval and waits for any rotation still in flight. */
+    stop: async () => {
+      clearInterval(timer);
+      await rotating;
+    },
     latestExpiry: () => Number(/^ttl-(\d+)-/.exec(minted[minted.length - 1] ?? "")?.[1] ?? 0),
   };
 }
@@ -163,7 +178,7 @@ describe("tokenFile rotation over a long run (mock gateway, token TTL mode)", ()
           // Forced boundary case: the refresher pauses until the current token has expired, the
           // request reads that expired token, and the refresher writes the next one before the
           // request reaches the gateway — the 401 then has a fresh token to retry with.
-          refresh.stop();
+          await refresh.stop();
           await sleep(Math.max(0, refresh.latestExpiry() - Date.now()) + 50);
           results.push(await send(async () => void (await refresh.rotate())));
           refresh.start();
@@ -173,7 +188,7 @@ describe("tokenFile rotation over a long run (mock gateway, token TTL mode)", ()
         await sleep(SPACING_MS);
       }
     } finally {
-      refresh.stop();
+      await refresh.stop();
     }
     const elapsed = Date.now() - started;
 

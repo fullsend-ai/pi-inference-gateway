@@ -279,6 +279,8 @@ A pi run can outlive its token: a GitHub Actions OIDC token, for example, expire
 Keep the file fresh with a background loop started before pi and stopped after it:
 
 - write the first token **before** starting pi: while the file is missing, no models are offered;
+- bound each mint with a timeout and retry a failed one soon, so a stalled issuer cannot outlast
+  the current token;
 - mint a new token about every 4 minutes, well inside a 5-minute lifetime, and replace the file
   atomically: a temp file in the same directory (`mktemp` creates it with mode 0600), then `mv`;
 - stop the loop when the script exits (`trap ... EXIT`);
@@ -305,8 +307,13 @@ steps:
     run: |
       export INFERENCE_GATEWAY_TOKEN_FILE="$RUNNER_TEMP/gateway-token"
       mint_token() {     # prints the token on stdout only, into the temp file below
-        curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$GATEWAY_AUDIENCE" | jq -er .value
+        # Bounded, so a stalled issuer cannot hold the loop past the token's expiry; -G with
+        # --data-urlencode appends the encoded audience to the URL's existing query.
+        # The request token goes in through stdin (-K -), not argv, so the process list never shows it.
+        printf 'header = "Authorization: bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" |
+          curl -fsS -K - --connect-timeout 10 --max-time 30 --retry 2 -G \
+            --data-urlencode "audience=$GATEWAY_AUDIENCE" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -er .value
       }
       refresh_token() {  # temp file in the same directory (mode 0600), then an atomic rename
         tmp=$(mktemp "$INFERENCE_GATEWAY_TOKEN_FILE.XXXXXX") || return 1
@@ -318,7 +325,10 @@ steps:
         fi
       }
       refresh_token      # the first token, before pi starts
-      ( while sleep 240; do refresh_token || echo "token refresh failed" >&2; done ) &
+      # Every 4 minutes; after a failure, try again in 15 seconds rather than waiting another 4.
+      ( while :; do
+          if refresh_token; then sleep 240; else echo "token refresh failed" >&2; sleep 15; fi
+        done ) &
       refresher=$!
       trap 'kill "$refresher" 2>/dev/null' EXIT
       pi --no-session -p --model gateway/<model> "..." </dev/null
