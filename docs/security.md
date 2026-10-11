@@ -37,9 +37,11 @@ logs. Back to the [README](../README.md).
   closes the gap between the host's check of the file and pi's read of it. That holds only while
   the host ensures three things, none of which the extension checks: neither the file's directory
   nor any directory above it is writable by the agent (otherwise the agent can replace the file, or
-  a directory containing it, by renaming another over it); neither the file nor any directory on
-  its path is a symlink to a target the agent can write; and every child pi inherits the same
-  `INFERENCE_GATEWAY_CONFIG_FILE` value, since an agent that can start pi with an environment of
+  a directory containing it, by renaming another over it); where the file or a directory on its
+  path is a symlink, the same holds for the path it resolves to, through every link: the resolved
+  file and every directory above it are not writable by the agent; and every child pi inherits the
+  same `INFERENCE_GATEWAY_CONFIG_FILE` value, and for a `~/` path the same home directory, since an
+  agent that can start pi with an environment of
   its own can point it at another file. A provider whose
   `baseUrlEnv` resolves to another URL than `INFERENCE_GATEWAY_BASE_URL` is refused
   `INFERENCE_GATEWAY_*` credentials exactly like a literal `baseUrl`.

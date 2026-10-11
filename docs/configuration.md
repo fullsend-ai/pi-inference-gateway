@@ -160,9 +160,11 @@ When it is set, the extension reads **only that file**: not the extension direct
 cannot write, and pi and every child pi it starts read the same file the host checked. That holds
 only while the host ensures three things, none of which the extension checks: the file's parent
 directory and every directory above it are not writable by the agent either (otherwise the agent
-can replace the file, or a directory containing it, by renaming another over it); neither the file
-nor any directory on its path is a symlink to a target the agent can write; and every child pi
-inherits the same `INFERENCE_GATEWAY_CONFIG_FILE` value (an agent that can start pi with an
+can replace the file, or a directory containing it, by renaming another over it); where the file
+or a directory on its path is a symlink, the same holds for the path it resolves to, through every
+link: the resolved file and every directory above it are not writable by the agent; and every
+child pi inherits the same `INFERENCE_GATEWAY_CONFIG_FILE` value, and for a `~/` path the same
+home directory (an agent that can start pi with an
 environment of its own can point it at another file, see [Security](security.md)).
 
 - A leading `~/` is expanded. The path must then be absolute; a relative path is reported, naming
