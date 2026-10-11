@@ -1132,6 +1132,11 @@ export function credentialKind(scheme: string): CredentialKind {
 
 export interface GatewayCredentials {
   token?: string;
+  /**
+   * The token is (or, while the file is missing or unusable, would be) read from `tokenFile`, so a
+   * re-read can yield a newer one. Never set for `apiKeyEnv` or Basic credentials.
+   */
+  tokenFromFile?: boolean;
   basic?: { username: string; password: string };
   /** Why a configured credential is unusable — never the credential itself. */
   problems: string[];
@@ -1147,11 +1152,14 @@ export async function resolveCredentials(
   env: Record<string, string | undefined> = process.env,
   readText: (path: string) => Promise<string | undefined> = readTextIfExists,
   want: CredentialKind | "all" = "all",
+  warn?: (message: string) => void,
 ): Promise<GatewayCredentials> {
   const credentials: GatewayCredentials = { problems: [] };
   if (want !== "basic") {
-    const token = await resolveToken(config, env, readText);
+    const token = await resolveToken(config, env, readText, warn);
     if (token) credentials.token = token;
+    // resolveToken never falls back to apiKeyEnv when tokenFile is set.
+    if (config.tokenFile) credentials.tokenFromFile = true;
   }
   if (want === "token") return credentials;
 
@@ -1186,15 +1194,32 @@ export function authHeaderEntry(scheme: string, credentials: GatewayCredentials)
   return scheme === "authorization" ? ["authorization", `Bearer ${credentials.token}`] : [scheme, credentials.token];
 }
 
+/** Token files already reported as unusable, per warn function: each path is reported once. */
+const warnedTokenFiles = new WeakMap<(message: string) => void, Set<string>>();
+
+/**
+ * A token file that exists but reads empty or with control characters (typically one caught
+ * mid-rewrite) gives no token, and `warn` is told once per path, naming the file but never its
+ * contents. A missing file is silent: the models are not offered until it exists.
+ */
 export async function resolveToken(
   config: Pick<GatewayConfig, "apiKeyEnv" | "tokenFile">,
   env: Record<string, string | undefined> = process.env,
   readText: (path: string) => Promise<string | undefined> = readTextIfExists,
+  warn?: (message: string) => void,
 ): Promise<string | undefined> {
   if (config.tokenFile) {
     const text = await readText(config.tokenFile);
     const token = text?.trim();
     if (token && !hasControlChars(token)) return token;
+    if (text !== undefined && warn) {
+      const warned = warnedTokenFiles.get(warn) ?? new Set<string>();
+      warnedTokenFiles.set(warn, warned);
+      if (!warned.has(config.tokenFile)) {
+        warned.add(config.tokenFile);
+        warn(`token file ${config.tokenFile} read empty or with control characters; no token sent (write it atomically: temp file, then rename)`);
+      }
+    }
     return undefined;
   }
   if (config.apiKeyEnv) {

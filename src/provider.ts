@@ -66,7 +66,8 @@ export interface RuntimeDeps {
 /**
  * Resolves the credential a scheme needs; called per request so token and password files are
  * re-read. Only that credential is read: an unreadable password file must not break a Bearer
- * target, nor an unreadable token file a Basic one.
+ * target, nor an unreadable token file a Basic one. `tokenFromFile` on the result lets the request
+ * fetch retry a 401 with a rotated token (see createGatewayFetch).
  */
 export type CredentialSource = (scheme: string) => Promise<GatewayCredentials>;
 
@@ -81,6 +82,10 @@ export type CredentialSource = (scheme: string) => Promise<GatewayCredentials>;
  *    headers pi's SDKs set are removed, then the scheme's header is set from the configured
  *    credentials — Bearer token, raw token in a named header, or Basic user:password. The key pi
  *    passes as `apiKey` is therefore never what goes on the wire; with Basic it is a placeholder.
+ *
+ * A 401 is retried once, through the same path, when the token came from `tokenFile` and the file
+ * now holds a different valid token (see `replayable` for which bodies qualify). Nothing else is
+ * retried: not `apiKeyEnv` or Basic credentials, not another status, not a second 401.
  *
  * `baseFetch` is resolved per call, not captured: `globalThis.fetch` is routinely replaced after
  * module load (proxy agents, test doubles, pi's own instrumentation).
@@ -99,13 +104,35 @@ export function createGatewayFetch({
 }): FetchFunction {
   return async (input, init) => {
     const transport = baseFetch ?? globalThis.fetch;
-    const headers = new Headers(input instanceof Request ? input.headers : undefined);
-    new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
-    for (const name of strip) headers.delete(name);
-    const entry = authHeaderEntry(scheme, await credentials(scheme));
-    if (entry) headers.set(entry[0], entry[1]);
-    return transport(input, { ...init, headers, redirect: "error" });
+    const send = (sent: GatewayCredentials) => {
+      const headers = new Headers(input instanceof Request ? input.headers : undefined);
+      new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+      for (const name of strip) headers.delete(name);
+      const entry = authHeaderEntry(scheme, sent);
+      if (entry) headers.set(entry[0], entry[1]);
+      return transport(input, { ...init, headers, redirect: "error" });
+    };
+    const first = await credentials(scheme);
+    const response = await send(first);
+    // A token file holds short-lived tokens: one may expire between read and use while its
+    // refresher has already written the next. Retry once, only for a file-sourced token, only when
+    // the file now holds a different valid token, and only when the body can be sent again.
+    if (response.status !== 401 || credentialKind(scheme) !== "token" || !first.tokenFromFile || !replayable(input, init)) {
+      return response;
+    }
+    const second = await credentials(scheme).catch(() => undefined);
+    if (!second?.tokenFromFile || !second.token || second.token === first.token) return response;
+    // Not awaited: cancelling one branch of a cloned (tee'd) body stays pending until the other
+    // branch is read or cancelled, which a wrapping fetch may never do.
+    void response.body?.cancel().catch(() => undefined);
+    return send(second);
   };
+}
+
+/** Whether a request can be sent twice: no body, or a string body (what pi's SDKs send). */
+function replayable(input: Parameters<FetchFunction>[0], init: Parameters<FetchFunction>[1]): boolean {
+  if (input instanceof Request && input.body !== null) return false;
+  return init?.body === undefined || init.body === null || typeof init.body === "string";
 }
 
 /** `pi-` + 32 hex characters of SHA-256: stable per session, and the raw pi session id never leaves. */
@@ -181,7 +208,9 @@ export function withGatewayFetch(
 
 /** Credentials for one gateway, resolved fresh from its config on every call. */
 export function credentialSource(config: GatewayConfig, deps: RuntimeDeps = {}): CredentialSource {
-  return (scheme) => resolveCredentials(config, deps.env ?? process.env, deps.readText, credentialKind(scheme));
+  // One warn function for the source's lifetime: resolveToken reports each unusable file once per function.
+  const warn = providerWarn(config, deps);
+  return (scheme) => resolveCredentials(config, deps.env ?? process.env, deps.readText, credentialKind(scheme), warn);
 }
 
 /**
