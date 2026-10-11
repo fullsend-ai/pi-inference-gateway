@@ -255,6 +255,9 @@ Anthropic-format list and on `/v1/messages`: the token goes out in each target's
 entry.
 
 - Whitespace around the token, the trailing newline included, is trimmed.
+- Whatever refreshes the file must replace it atomically: write a temp file in the same directory,
+  then `mv` (rename) it over the token file. A file rewritten in place can be read mid-write, and a
+  truncated token that is still printable cannot be told apart from a valid one.
 - While the file is missing or empty, the models are not offered (see
   [Troubleshooting](troubleshooting.md), `token file ... is missing or empty`).
 - Without a config file, `INFERENCE_GATEWAY_TOKEN_FILE=<path>` next to `INFERENCE_GATEWAY_BASE_URL`

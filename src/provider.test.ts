@@ -8,6 +8,7 @@ import { parseModelEntry, buildModel, extraModels, type GatewayModel } from "./d
 import {
   createGatewayFetch,
   createGatewayProvider,
+  credentialSource,
   gatewayAuth,
   gatewayProviderOptions,
   initialModels,
@@ -155,6 +156,209 @@ describe("createGatewayFetch", () => {
       seen.map((entry) => entry.headers.get("authorization")),
       ["Bearer t1", "Bearer t2"],
     );
+  });
+});
+
+describe("createGatewayFetch: one retry on 401 with a rotated token file", () => {
+  const TOKEN_FILE = "/run/gw-token";
+  const URL_ = "https://gw.example.com/v1/responses";
+  const BODY = JSON.stringify({ model: "test-gpt", input: "hi" });
+
+  /**
+   * A gateway double answering `statuses` in turn (the last one repeats). `onRequest` runs as each
+   * request arrives, the way a refresher rewrites the file while a request is in flight.
+   */
+  const gateway = (statuses: number[], onRequest: (index: number) => void = () => {}) => {
+    const seen: Array<{ input: Parameters<FetchFunction>[0]; init: RequestInit | undefined; headers: Headers }> = [];
+    const cancelled: number[] = [];
+    const baseFetch: FetchFunction = async (input, init) => {
+      const index = seen.length;
+      seen.push({ input, init, headers: new Headers(init?.headers) });
+      onRequest(index);
+      const body = new ReadableStream<Uint8Array>({
+        cancel: () => {
+          cancelled.push(index);
+        },
+      });
+      return new Response(body, { status: statuses[Math.min(index, statuses.length - 1)] });
+    };
+    return { seen, cancelled, baseFetch };
+  };
+
+  /** The production credential path: tokenFile (winning over apiKeyEnv) re-read through `file.text`. */
+  const fileSource = (file: { text: string | undefined }, warn: (message: string) => void = () => {}) =>
+    credentialSource(config({ tokenFile: TOKEN_FILE }), { env: { GW_KEY: "env-key" }, readText: async () => file.text, warn });
+
+  it("401 and the file changed: retries once with the new token and returns the retry's response", async () => {
+    const file = { text: "old-token\n" };
+    const gw = gateway([401, 200], () => {
+      file.text = "new-token\n";
+    });
+    const fetch = createGatewayFetch({ scheme: "authorization", credentials: fileSource(file), baseFetch: gw.baseFetch });
+    const response = await fetch(URL_, { method: "POST", body: BODY });
+    assert.equal(response.status, 200);
+    assert.deepEqual(
+      gw.seen.map((entry) => entry.headers.get("authorization")),
+      ["Bearer old-token", "Bearer new-token"],
+    );
+    assert.equal(gw.seen[1].init?.body, BODY, "the same body is sent again");
+    assert.deepEqual(gw.cancelled, [0], "the first 401 body is cancelled before the retry");
+  });
+
+  it("401 and the file unchanged: one request, the 401 is returned", async () => {
+    const gw = gateway([401]);
+    const fetch = createGatewayFetch({ scheme: "authorization", credentials: fileSource({ text: "same-token\n" }), baseFetch: gw.baseFetch });
+    const response = await fetch(URL_, { method: "POST", body: BODY });
+    assert.equal(response.status, 401);
+    assert.equal(gw.seen.length, 1);
+  });
+
+  it("401 twice while the file keeps changing: two requests, the second 401 is returned", async () => {
+    const file = { text: "token-0" };
+    const gw = gateway([401], (index) => {
+      file.text = `token-${index + 1}`;
+    });
+    const fetch = createGatewayFetch({ scheme: "authorization", credentials: fileSource(file), baseFetch: gw.baseFetch });
+    const response = await fetch(URL_, { method: "POST", body: BODY });
+    assert.equal(response.status, 401);
+    assert.deepEqual(
+      gw.seen.map((entry) => entry.headers.get("authorization")),
+      ["Bearer token-0", "Bearer token-1"],
+    );
+  });
+
+  it("a missing token on the first request counts as different", async () => {
+    const file: { text: string | undefined } = { text: undefined };
+    const gw = gateway([401, 200], () => {
+      file.text = "fresh-token\n";
+    });
+    const fetch = createGatewayFetch({ scheme: "authorization", credentials: fileSource(file), baseFetch: gw.baseFetch });
+    const response = await fetch(URL_, { method: "POST", body: BODY });
+    assert.equal(response.status, 200);
+    assert.deepEqual(
+      gw.seen.map((entry) => entry.headers.get("authorization")),
+      [null, "Bearer fresh-token"],
+    );
+  });
+
+  it("never retries an apiKeyEnv token, even when the variable changed", async () => {
+    const env: Record<string, string | undefined> = { GW_KEY: "k1" };
+    const gw = gateway([401, 200], () => {
+      env.GW_KEY = "k2";
+    });
+    const fetch = createGatewayFetch({ scheme: "authorization", credentials: credentialSource(config(), { env }), baseFetch: gw.baseFetch });
+    assert.equal((await fetch(URL_, { method: "POST", body: BODY })).status, 401);
+    assert.equal(gw.seen.length, 1);
+  });
+
+  it("never retries Basic credentials, even from a changed password file next to a token file", async () => {
+    const files: Record<string, string> = { [TOKEN_FILE]: "tok-1", "/run/gw-password": "pw-1" };
+    const gw = gateway([401, 200], () => {
+      files[TOKEN_FILE] = "tok-2";
+      files["/run/gw-password"] = "pw-2";
+    });
+    const cfg = config({ tokenFile: TOKEN_FILE, passwordFile: "/run/gw-password" });
+    const credentials = credentialSource(cfg, { env: {}, readText: async (path) => files[path] });
+    const fetch = createGatewayFetch({ scheme: "basic", credentials, baseFetch: gw.baseFetch });
+    assert.equal((await fetch(URL_, { method: "POST", body: BODY })).status, 401);
+    assert.equal(gw.seen.length, 1);
+  });
+
+  for (const status of [403, 500]) {
+    it(`never retries a ${status}, even when the file changed`, async () => {
+      const file = { text: "old-token" };
+      const gw = gateway([status, 200], () => {
+        file.text = "new-token";
+      });
+      const fetch = createGatewayFetch({ scheme: "authorization", credentials: fileSource(file), baseFetch: gw.baseFetch });
+      assert.equal((await fetch(URL_, { method: "POST", body: BODY })).status, status);
+      assert.equal(gw.seen.length, 1);
+    });
+  }
+
+  it("never retries a body that cannot be replayed", async () => {
+    const bodies: Array<() => RequestInit> = [
+      () => ({ method: "POST", body: new TextEncoder().encode(BODY) }),
+      () => ({ method: "POST", body: new Blob([BODY]) }),
+      () => ({ method: "POST", body: new ReadableStream({ start: (c) => c.close() }), duplex: "half" }),
+    ];
+    for (const init of bodies) {
+      const file = { text: "old-token" };
+      const gw = gateway([401, 200], () => {
+        file.text = "new-token";
+      });
+      const fetch = createGatewayFetch({ scheme: "authorization", credentials: fileSource(file), baseFetch: gw.baseFetch });
+      assert.equal((await fetch(URL_, init())).status, 401);
+      assert.equal(gw.seen.length, 1);
+    }
+  });
+
+  it("never retries a Request input that carries a body", async () => {
+    const file = { text: "old-token" };
+    const gw = gateway([401, 200], () => {
+      file.text = "new-token";
+    });
+    const fetch = createGatewayFetch({ scheme: "authorization", credentials: fileSource(file), baseFetch: gw.baseFetch });
+    assert.equal((await fetch(new Request(URL_, { method: "POST", body: BODY }))).status, 401);
+    assert.equal(gw.seen.length, 1);
+  });
+
+  it("the retry keeps redirect: error, the same signal and exactly one auth header", async () => {
+    const file = { text: "old-token" };
+    const gw = gateway([401, 200], () => {
+      file.text = "new-token";
+    });
+    const controller = new AbortController();
+    const fetch = createGatewayFetch({
+      scheme: "x-api-key",
+      credentials: fileSource(file),
+      strip: ["authorization", "x-api-key"],
+      baseFetch: gw.baseFetch,
+    });
+    const response = await fetch(URL_, {
+      method: "POST",
+      body: BODY,
+      signal: controller.signal,
+      headers: { authorization: "Bearer pi-key", "x-api-key": "pi-key", "x-other": "1" },
+    });
+    assert.equal(response.status, 200);
+    const retry = gw.seen[1];
+    assert.equal(retry.init?.redirect, "error");
+    assert.equal(retry.init?.signal, controller.signal);
+    assert.equal(retry.headers.get("x-api-key"), "new-token");
+    assert.equal(retry.headers.has("authorization"), false, "exactly one auth header");
+    assert.equal(retry.headers.get("x-other"), "1");
+  });
+
+  it("an empty or control-character file sends no auth header and warns once, naming the path but no token text", async () => {
+    const warnings: string[] = [];
+    const file: { text: string | undefined } = { text: "" };
+    const gw = gateway([200]);
+    const fetch = createGatewayFetch({ scheme: "authorization", credentials: fileSource(file, (m) => warnings.push(m)), baseFetch: gw.baseFetch });
+    await fetch(URL_);
+    file.text = "zq9\u0007x7\n";
+    await fetch(URL_);
+    await fetch(URL_);
+    assert.deepEqual(
+      gw.seen.map((entry) => entry.headers.get("authorization")),
+      [null, null, null],
+    );
+    assert.equal(warnings.length, 1, warnings.join("\n"));
+    assert.ok(warnings[0].includes(TOKEN_FILE), warnings[0]);
+    assert.ok(!warnings[0].includes("zq9") && !warnings[0].includes("x7"), warnings[0]);
+  });
+
+  it("a missing file sends no auth header and stays silent", async () => {
+    const warnings: string[] = [];
+    const gw = gateway([200]);
+    const fetch = createGatewayFetch({
+      scheme: "authorization",
+      credentials: fileSource({ text: undefined }, (m) => warnings.push(m)),
+      baseFetch: gw.baseFetch,
+    });
+    await fetch(URL_);
+    assert.equal(gw.seen[0].headers.has("authorization"), false);
+    assert.deepEqual(warnings, []);
   });
 });
 

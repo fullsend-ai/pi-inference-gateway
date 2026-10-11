@@ -1476,4 +1476,31 @@ describe("resolveToken", () => {
     assert.equal(await resolveToken({ tokenFile: "/missing" }, {}, async () => undefined), undefined);
     assert.equal(await resolveToken({ tokenFile: "/t" }, {}, async () => "a\nb"), undefined);
   });
+
+  it("warns once per path about an empty or control-character file, never with its text; a missing file is silent", async () => {
+    const warnings: string[] = [];
+    const warn = (message: string) => warnings.push(message);
+    const contents: Record<string, string | undefined> = { "/run/a": "", "/run/b": "qv8\u0001k3" };
+    const read = async (path: string) => contents[path];
+    assert.equal(await resolveToken({ tokenFile: "/run/a" }, {}, read, warn), undefined);
+    assert.equal(await resolveToken({ tokenFile: "/run/a" }, {}, read, warn), undefined);
+    assert.equal(await resolveToken({ tokenFile: "/run/b" }, {}, read, warn), undefined);
+    assert.equal(await resolveToken({ tokenFile: "/run/b" }, {}, read, warn), undefined);
+    assert.equal(await resolveToken({ tokenFile: "/run/missing" }, {}, read, warn), undefined);
+    assert.equal(warnings.length, 2, warnings.join("\n"));
+    assert.ok(warnings[0].includes("/run/a") && warnings[1].includes("/run/b"), warnings.join("\n"));
+    assert.ok(warnings.every((w) => !w.includes("qv8") && !w.includes("k3")), warnings.join("\n"));
+  });
+});
+
+describe("resolveCredentials: tokenFromFile", () => {
+  const read = async () => "tok";
+  it("is set when the token comes from tokenFile, even while the file is missing", async () => {
+    assert.equal((await resolveCredentials({ tokenFile: "/t", apiKeyEnv: "K" }, { K: "k" }, read, "token")).tokenFromFile, true);
+    assert.equal((await resolveCredentials({ tokenFile: "/t" }, {}, async () => undefined, "token")).tokenFromFile, true);
+  });
+  it("is not set for apiKeyEnv or a Basic-only resolve", async () => {
+    assert.equal((await resolveCredentials({ apiKeyEnv: "K" }, { K: "k" }, read, "token")).tokenFromFile, undefined);
+    assert.equal((await resolveCredentials({ tokenFile: "/t", passwordEnv: "P" }, { P: "pw" }, read, "basic")).tokenFromFile, undefined);
+  });
 });
