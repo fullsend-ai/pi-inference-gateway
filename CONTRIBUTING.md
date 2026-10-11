@@ -26,7 +26,8 @@ by.
 │   ├── provider.ts         # createProvider wiring, auth, header override, refresh, registration
 │   ├── index.ts            # thin default export + /gateway-refresh
 │   ├── test-fixtures.ts    # canned SSE per transport, shared with the mock gateway
-│   └── *.test.ts           # node --test; no network, no pi process (regressions.test.ts: review fixes)
+│   └── *.test.ts           # node --test; no network, no pi process (regressions.test.ts: review fixes;
+│                           #   rotation.test.ts: the mock gateway on loopback, nothing else)
 ├── scripts/mock-gateway.mjs  # local path-routed gateway for end-to-end runs
 ├── docs/                   # user reference, one topic per page; README.md is the landing page
 └── .github/workflows/      # ci.yml (pi matrix), release.yml (tag → release with tarball digest)
@@ -97,6 +98,13 @@ request:
   and discovery), or the configured `bearer` / header name / `basic`. Credentials are resolved per
   request (`resolveCredentials`), so token and password files rotate without a restart; pi's
   `apiKey` is only what pi needs to dispatch (a placeholder under Basic).
+
+It also retries a 401 once, through the same path, when the token came from `tokenFile`, a re-read
+gives a different valid token (the file rotated) and the body is replayable (none, or a string).
+It never retries for `apiKeyEnv` or Basic credentials, for any other status, or after a second 401.
+`rotation.test.ts` exercises this against the mock gateway's token TTL mode while a refresher
+rotates the file (see
+[Refreshing the token during a long run](docs/configuration.md#refreshing-the-token-during-a-long-run)).
 
 `bindEnvCredentials()` drops any provider that names an `INFERENCE_GATEWAY_*` credential variable
 while pointing somewhere other than `INFERENCE_GATEWAY_BASE_URL`, before anything is registered.

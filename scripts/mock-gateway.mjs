@@ -34,6 +34,13 @@
 //     any other listed model, any path     → accepted; `openai/<name>` matches the wildcard
 //     an unknown model                     → 404 JSON `model_not_found`
 //
+// Token TTL mode (opt-in, live and agentgateway; no effect with --auth basic): with
+// $MOCK_GATEWAY_TOKEN_TTL_MS set to a positive integer, $MOCK_GATEWAY_TOKEN is ignored and a token is
+// accepted only if it reads `ttl-<expiresAtMs>-<random>` (expiry in Unix milliseconds, random
+// [A-Za-z0-9]+), has not expired, and expires no later than TTL ms from now. An expired or malformed
+// token gets the same 401 as a wrong token in that mode. Mint one with, for example:
+//   node -e 'console.log(`ttl-${Date.now() + 300000}-${require("node:crypto").randomBytes(12).toString("hex")}`)'
+//
 // Each request is logged as `<method> <path> auth=<header names> [anthropic-version] model=<id>`
 // (auth shows header names and the authorization scheme only, never a value).
 
@@ -41,6 +48,12 @@ import { createServer } from "node:http";
 import { sseFor } from "../src/test-fixtures.ts";
 
 const TOKEN = process.env.MOCK_GATEWAY_TOKEN || "test-token";
+const TTL_RAW = process.env.MOCK_GATEWAY_TOKEN_TTL_MS;
+const TTL_MS = TTL_RAW ? Number(TTL_RAW) : undefined;
+if (TTL_MS !== undefined && !(Number.isSafeInteger(TTL_MS) && TTL_MS > 0)) {
+  console.error("MOCK_GATEWAY_TOKEN_TTL_MS must be a positive integer");
+  process.exit(2);
+}
 const PASSWORD = process.env.MOCK_GATEWAY_PASSWORD || "test-pass"; // gitleaks:allow (mock default)
 const args = process.argv.slice(2);
 const flagValue = (name) => {
@@ -85,8 +98,18 @@ const ROUTES = {
 
 function authorized(headers, kind) {
   if (MODE === "basic") return headers.authorization === BASIC;
-  if (MODE === "agentgateway") return headers.authorization === `Bearer ${TOKEN}`;
-  return kind === "x-api-key" ? headers["x-api-key"] === TOKEN : headers.authorization === `Bearer ${TOKEN}`;
+  const bearer = /^Bearer (.*)$/.exec(String(headers.authorization ?? ""))?.[1];
+  if (MODE === "agentgateway") return validToken(bearer);
+  return validToken(kind === "x-api-key" ? headers["x-api-key"] : bearer);
+}
+
+/** $MOCK_GATEWAY_TOKEN, or in TTL mode any well-formed `ttl-<expiresAtMs>-<random>` token still in date. */
+function validToken(value) {
+  if (typeof value !== "string") return false;
+  if (TTL_MS === undefined) return value === TOKEN;
+  const expiresAt = Number(/^ttl-(\d{1,16})-[A-Za-z0-9]+$/.exec(value)?.[1]);
+  const now = Date.now();
+  return Number.isSafeInteger(expiresAt) && expiresAt > now && expiresAt <= now + TTL_MS;
 }
 
 function describeAuth(kind) {
