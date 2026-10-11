@@ -41,9 +41,8 @@ logs. Back to the [README](../README.md).
   path is a symlink, the same holds for the path it resolves to, through every link: the resolved
   file and every directory above it are not writable by the agent; and every child pi inherits the
   same `INFERENCE_GATEWAY_CONFIG_FILE` value, and for a `~/` path the same home directory, since an
-  agent that can start pi with an environment of
-  its own can point it at another file. A provider whose
-  `baseUrlEnv` resolves to another URL than `INFERENCE_GATEWAY_BASE_URL` is refused
+  agent that can start pi with an environment of its own can point it at another file. A provider
+  whose `baseUrlEnv` resolves to another URL than `INFERENCE_GATEWAY_BASE_URL` is refused
   `INFERENCE_GATEWAY_*` credentials exactly like a literal `baseUrl`.
 - **No secrets in the file.** Keys and passwords are referenced by variable name or file path; a
   literal `apiKey` or `password`, or an `authorization`/`x-api-key` entry in `headers`, is refused.

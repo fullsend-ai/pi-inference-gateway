@@ -164,8 +164,8 @@ can replace the file, or a directory containing it, by renaming another over it)
 or a directory on its path is a symlink, the same holds for the path it resolves to, through every
 link: the resolved file and every directory above it are not writable by the agent; and every
 child pi inherits the same `INFERENCE_GATEWAY_CONFIG_FILE` value, and for a `~/` path the same
-home directory (an agent that can start pi with an
-environment of its own can point it at another file, see [Security](security.md)).
+home directory (an agent that can start pi with an environment of its own can point it at another
+file, see [Security](security.md)).
 
 - A leading `~/` is expanded. The path must then be absolute; a relative path is reported, naming
   it, and no file is read, since pi's working directory is the agent's repository.
