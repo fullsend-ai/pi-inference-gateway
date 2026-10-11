@@ -205,6 +205,30 @@ describe("createGatewayFetch: one retry on 401 with a rotated token file", () =>
     assert.deepEqual(gw.cancelled, [0], "the first 401 body is cancelled before the retry");
   });
 
+  it("retries even when the 401 body is a clone whose other branch is never read", async () => {
+    const file = { text: "old-token" };
+    const kept: Response[] = [];
+    let calls = 0;
+    const baseFetch: FetchFunction = async () => {
+      calls += 1;
+      if (calls > 1) return new Response("ok", { status: 200 });
+      file.text = "new-token";
+      // A wrapping fetch that keeps a clone (e.g. for logging) and never reads it: cancelling the
+      // returned branch then never settles.
+      const original = new Response("unauthorized", { status: 401 });
+      kept.push(original);
+      return original.clone();
+    };
+    const fetch = createGatewayFetch({ scheme: "authorization", credentials: fileSource(file), baseFetch });
+    const settled = await Promise.race([
+      fetch(URL_, { method: "POST", body: BODY }).then((response) => response.status),
+      new Promise((resolve) => setTimeout(() => resolve("timed out"), 1000)),
+    ]);
+    assert.equal(settled, 200);
+    assert.equal(calls, 2);
+    assert.equal(kept.length, 1);
+  });
+
   it("401 and the file unchanged: one request, the 401 is returned", async () => {
     const gw = gateway([401]);
     const fetch = createGatewayFetch({ scheme: "authorization", credentials: fileSource({ text: "same-token\n" }), baseFetch: gw.baseFetch });

@@ -122,7 +122,9 @@ export function createGatewayFetch({
     }
     const second = await credentials(scheme).catch(() => undefined);
     if (!second?.tokenFromFile || !second.token || second.token === first.token) return response;
-    await response.body?.cancel().catch(() => undefined);
+    // Not awaited: cancelling one branch of a cloned (tee'd) body stays pending until the other
+    // branch is read or cancelled, which a wrapping fetch may never do.
+    void response.body?.cancel().catch(() => undefined);
     return send(second);
   };
 }
