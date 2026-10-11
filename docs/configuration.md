@@ -265,11 +265,70 @@ entry.
 - Whitespace around the token, the trailing newline included, is trimmed.
 - Whatever refreshes the file must replace it atomically: write a temp file in the same directory,
   then `mv` (rename) it over the token file. A file rewritten in place can be read mid-write, and a
-  truncated token that is still printable cannot be told apart from a valid one.
+  truncated token that is still printable cannot be told apart from a valid one. A read caught
+  empty or with control characters is reported once (see [Troubleshooting](troubleshooting.md),
+  `token file ... read empty or with control characters`). The recipe below does this.
 - While the file is missing or empty, the models are not offered (see
   [Troubleshooting](troubleshooting.md), `token file ... is missing or empty`).
 - Without a config file, `INFERENCE_GATEWAY_TOKEN_FILE=<path>` next to `INFERENCE_GATEWAY_BASE_URL`
   does the same for the `gateway` provider.
+
+### Refreshing the token during a long run
+
+A pi run can outlive its token: a GitHub Actions OIDC token, for example, expires after 5 minutes.
+Keep the file fresh with a background loop started before pi and stopped after it:
+
+- write the first token **before** starting pi: while the file is missing, no models are offered;
+- mint a new token about every 4 minutes, well inside a 5-minute lifetime, and replace the file
+  atomically: a temp file in the same directory (`mktemp` creates it with mode 0600), then `mv`;
+- stop the loop when the script exits (`trap ... EXIT`);
+- never echo the token: no `set -x`, and never print the issuer's response.
+
+A request that leaves just as its token expires gets a 401; when the file by then holds a different
+token, the extension retries that request once with it. Only a token from `tokenFile` is retried,
+and only once.
+
+A GitHub Actions step that mints the job's OIDC token for the gateway's audience. The base URL and
+audience are placeholders:
+
+```yaml
+permissions:
+  id-token: write    # lets the job request OIDC tokens
+  contents: read
+
+steps:
+  - name: Run pi with a refreshed OIDC token
+    shell: bash      # bash -eo pipefail
+    env:
+      INFERENCE_GATEWAY_BASE_URL: https://gateway.example.com
+      GATEWAY_AUDIENCE: your-gateway-audience
+    run: |
+      export INFERENCE_GATEWAY_TOKEN_FILE="$RUNNER_TEMP/gateway-token"
+      mint_token() {     # prints the token on stdout only, into the temp file below
+        curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$GATEWAY_AUDIENCE" | jq -er .value
+      }
+      refresh_token() {  # temp file in the same directory (mode 0600), then an atomic rename
+        tmp=$(mktemp "$INFERENCE_GATEWAY_TOKEN_FILE.XXXXXX") || return 1
+        if mint_token > "$tmp" && test -s "$tmp"; then
+          mv -f "$tmp" "$INFERENCE_GATEWAY_TOKEN_FILE"
+        else
+          rm -f "$tmp"
+          return 1
+        fi
+      }
+      refresh_token      # the first token, before pi starts
+      ( while sleep 240; do refresh_token || echo "token refresh failed" >&2; done ) &
+      refresher=$!
+      trap 'kill "$refresher" 2>/dev/null' EXIT
+      pi --no-session -p --model gateway/<model> "..." </dev/null
+```
+
+Outside GitHub Actions, replace `mint_token` with your issuer's command; the rest stays the same.
+To try the loop locally, start the mock gateway with `MOCK_GATEWAY_TOKEN_TTL_MS=300000`: it then
+accepts only self-describing `ttl-<expiresAtMs>-<random>` tokens that have not expired, and its
+header comment shows a one-line `mint_token`. `src/rotation.test.ts` runs this setup with a
+1-second lifetime on every `npm run ci`.
 
 ## A gateway that validates the JWT
 

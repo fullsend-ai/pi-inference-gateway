@@ -58,6 +58,12 @@ it to the wrong API. With no model offered at all, pi fails with the second mess
 **`[pi-inference-gateway] gateway: token file ... is missing or empty`.** The token file configured
 by `INFERENCE_GATEWAY_TOKEN_FILE` or `tokenFile` is not there yet; models are not offered until it is.
 
+**`[pi-inference-gateway] gateway: token file <path> read empty or with control characters; no token sent (write it atomically: temp file, then rename)`.**
+The file was read while it was being rewritten in place, so that request went out without a token.
+The warning appears once per file. Make whatever refreshes the file write a temp file in the same
+directory and then rename it over the token file; see the atomic-replace note in the
+[token file walkthrough](configuration.md#token-file-walkthrough).
+
 **`No API key found for anthropic`.** You used a bare model id. Use `gateway/<model>`.
 
 **Claude: `400 ... messages.1.output_config: Extra inputs are not permitted`.** pi's catalog marks
