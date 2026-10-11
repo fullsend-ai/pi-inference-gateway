@@ -1408,6 +1408,57 @@ describe("INFERENCE_GATEWAY_CONFIG_FILE", () => {
     assert.ok(result.warnings[0].startsWith(`${NAMED}: `), result.warnings[0]);
   });
 
+  it("keeps the env provider, and only it, whatever is wrong with the named file", async () => {
+    const env = { INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com", INFERENCE_GATEWAY_API_KEY: "k" };
+    const relative = "inference-gateway.json";
+    const malformed = '{ "providers": { "corp": { "apiKeyEnv": "CORP_KEY" oops';
+    const unreadable = async (path: string): Promise<string | undefined> => {
+      if (path === NAMED) throw new Error("EACCES: permission denied");
+      return entry("fallback");
+    };
+    const dir = mkdtempSync(join(tmpdir(), "inference-gateway-"));
+    try {
+      const cases: Array<{
+        name: string;
+        file: string;
+        /** Undefined: the default filesystem reader. */
+        readText?: (path: string) => Promise<string | undefined>;
+        prefix: string;
+        reason: RegExp;
+      }> = [
+        {
+          name: "relative path",
+          file: relative,
+          readText: reader({}),
+          prefix: `INFERENCE_GATEWAY_CONFIG_FILE: ${JSON.stringify(relative)}`,
+          reason: /not an absolute path/,
+        },
+        { name: "unreadable", file: NAMED, readText: unreadable, prefix: `${NAMED}: `, reason: /EACCES/ },
+        { name: "invalid JSON", file: NAMED, readText: reader({ [NAMED]: malformed }), prefix: `${NAMED}: `, reason: /invalid JSON/ },
+        { name: "directory", file: dir, prefix: `${dir}: `, reason: /EISDIR/ },
+        { name: "missing", file: NAMED, readText: reader({}), prefix: `${NAMED}: `, reason: /no such file/ },
+      ];
+      for (const { name, file, readText, prefix, reason } of cases) {
+        const result = await loadConfig({
+          env: { ...env, INFERENCE_GATEWAY_CONFIG_FILE: file },
+          home: HOME,
+          extensionDir: EXT,
+          ...(readText ? { readText } : {}),
+        });
+        assert.deepEqual(ids(result.providers), ["gateway"], name);
+        const gateway = result.providers[0];
+        assert.equal(gateway.baseUrl, "https://gw.example.com", name);
+        assert.equal(gateway.apiKeyEnv, "INFERENCE_GATEWAY_API_KEY", name);
+        assert.equal(result.warnings.length, 1, `${name}: ${JSON.stringify(result.warnings)}`);
+        assert.ok(result.warnings[0].startsWith(prefix), `${name}: ${result.warnings[0]}`);
+        assert.match(result.warnings[0], reason, name);
+        assert.equal(result.warnings[0].includes("CORP_KEY"), false, `${name}: ${result.warnings[0]}`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("validates the file as before, refusing a literal credential", async () => {
     const named = JSON.stringify({
       providers: { a: { baseUrl: "https://a.example.com", apiKey: "secret" }, b: { baseUrl: "https://b.example.com" } },
