@@ -79,6 +79,7 @@ function refresher(tokenFile: string) {
   const minted: string[] = [];
   let timer: NodeJS.Timeout | undefined;
   let rotating: Promise<void> = Promise.resolve();
+  let failure: unknown;
   let writes = 0;
   const rotate = async () => {
     const token = `ttl-${Date.now() + TTL_MS}-${randomBytes(12).toString("hex")}`;
@@ -95,13 +96,19 @@ function refresher(tokenFile: string) {
       // Rotations are chained, so a slow write cannot rename an older token over a newer one, and
       // a failed write fails the test at stop() instead of surfacing as an unhandled rejection.
       timer = setInterval(() => {
-        rotating = rotating.then(async () => void (await rotate()));
+        rotating = rotating.then(rotate).then(
+          () => undefined,
+          (error: unknown) => {
+            failure ??= error;
+          },
+        );
       }, REFRESH_MS);
     },
-    /** Stops the interval and waits for any rotation still in flight. */
+    /** Stops the interval, waits for any rotation still in flight, and rethrows the first failure. */
     stop: async () => {
       clearInterval(timer);
       await rotating;
+      if (failure !== undefined) throw failure;
     },
     latestExpiry: () => Number(/^ttl-(\d+)-/.exec(minted[minted.length - 1] ?? "")?.[1] ?? 0),
   };

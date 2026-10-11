@@ -307,11 +307,12 @@ steps:
     run: |
       export INFERENCE_GATEWAY_TOKEN_FILE="$RUNNER_TEMP/gateway-token"
       mint_token() {     # prints the token on stdout only, into the temp file below
-        # Bounded, so a stalled issuer cannot hold the loop past the token's expiry; -G with
-        # --data-urlencode appends the encoded audience to the URL's existing query.
+        # Bounded at 30 s, so a stalled issuer cannot hold the loop past the token's expiry (the loop
+        # below retries a failure after 15 s). -G with --data-urlencode appends the encoded audience
+        # to the URL's existing query.
         # The request token goes in through stdin (-K -), not argv, so the process list never shows it.
         printf 'header = "Authorization: bearer %s"\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" |
-          curl -fsS -K - --connect-timeout 10 --max-time 30 --retry 2 -G \
+          curl -fsS -K - --connect-timeout 10 --max-time 30 -G \
             --data-urlencode "audience=$GATEWAY_AUDIENCE" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -er .value
       }
