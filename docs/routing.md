@@ -26,7 +26,18 @@ everything: [agentgateway](gateways/agentgateway.md) lists every model, Claude i
 `owned_by: "openai"`.
 
 Catalog lookups also try the id without a `vendor/` prefix and with `-`/`.` swapped between digits,
-so `oss/zai-org/glm-5-3` finds pi's `glm-5.3`. The gateway's id is always what is sent back.
+so `oss/zai-org/glm-5-3` finds pi's `glm-5.3`. Only when none of those match, they try, in order
+(each again with `-`/`.` swapped):
+
+1. every intermediate path, dropping leading segments one at a time (`a/b/c/d` → `b/c/d`, `c/d`);
+2. every id so far with one trailing snapshot suffix removed: `-` and exactly 4 or 8 digits
+   (`-1017`, `-0731`, `-20241022`). Nothing else is stripped;
+3. all of the above again, ignoring case.
+
+So `oss/deepseek-ai/DeepSeek-V4.1-Flash-1017` finds pi's `deepseek-ai/DeepSeek-V4.1-Flash` (1M
+context, reasoning). An id that matches without these rules keeps the same match. The gateway's id
+is always what is sent back. A snapshot can have different limits from the model pi lists; config
+`models[id]` (`contextWindow`, `maxTokens`, `reasoning`) still wins over the catalog.
 
 Model metadata (context window, max output, reasoning, image input, cost) comes from the config,
 then the gateway's own fields (`context_window`, `max_input_tokens`, `max_output_tokens`,
