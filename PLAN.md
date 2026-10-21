@@ -327,6 +327,7 @@ keyed on a vendor, model id, owner or backend:
 | Gateway `api` / endpoint hints | `selectApi`, `apiFromEndpoints` | routing | kept | The gateway describing its own models. |
 | pi catalog under `anthropic` → messages, `openai` → responses, other → completions | `selectApi`, `findCatalogModel`, `CATALOG_PRIORITY` | routing | kept | Describes which protocol a model speaks; a gateway exposes only the three. |
 | `claude-` id prefix → messages | `isClaudeId` | routing | kept | Describes the model family's native protocol. |
+| Catalog id normalisation: leading path segments, one `-MMDD`/`-20YYMMDD` suffix, case | `candidateTiers`, `SNAPSHOT_SUFFIX_RE`, `matchCatalog` | id shape | kept | General: id shapes any gateway uses (routing prefixes, snapshot dates); no vendor or model named. |
 | Owner hints (`anthropic*`, `openai*`, `azure`) | `isAnthropicOwner`, `isOpenAIOwner` | routing | kept | Describes the model. |
 | `AMBIGUOUS_OWNERS` (`vertex`, `bedrock`, `openrouter`, `system`, ...) | `discovery.ts` | routing | kept | Hosting/aggregator owners say nothing about the protocol. |
 | `compat` / `thinkingLevelMap` copied only from a catalog entry on the same transport | `withApi` | metadata | kept | General: both describe how one transport shapes a request. |

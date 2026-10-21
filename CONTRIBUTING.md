@@ -120,7 +120,7 @@ See [How each model gets its API](docs/routing.md#how-each-model-gets-its-api) f
   400. So the anthropic/openai catalog hit and the `claude-` rule run before the owner rule.
 - **The `claude-` rule runs before "any other catalog provider → completions".** pi's aggregator
   catalogs (`github-copilot`, `opencode`, `openrouter`, `vercel-ai-gateway`) list Claude ids too, and
-  the lookup normalises `-`/`.`, case and date suffixes; without this order a Claude id missing from pi's `anthropic` catalog
+  the lookup normalises ids (paths, case, date suffixes, `-`/`.`); without this order a Claude id missing from pi's `anthropic` catalog
   would go to `/v1/chat/completions`.
 
 Metadata is merged per field: config → gateway fields → pi's built-in model → defaults. `compat` and

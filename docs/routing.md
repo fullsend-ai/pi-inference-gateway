@@ -41,10 +41,13 @@ back.
 
 A match from these rules counts like any other:
 
-- **It picks the transport** (rules 3 and 6 above), so `GPT-4o` now goes to `/v1/responses`. Pin one
-  with `models[id].api`.
-- **It brings that entry's `compat` and `thinkingLevelMap`.** When several providers list the id,
-  the first in pi's provider order wins. Override with `models[id].compat`, or `null` to drop it.
+- **It picks the transport**, by rules 3 and 6 of the list at the top of this page. An id that used
+  to fall through to `defaultApi` can move: with `defaultApi` set to `openai-completions`, `GPT-4o`
+  now goes to `/v1/responses`. Pin one with `models[id].api`.
+- **It can bring that entry's `compat` and `thinkingLevelMap`**, when the entry is on the same
+  transport. When several providers list the id, this extension's provider priority picks one
+  (`anthropic`, `openai`, then first-party vendors, then the rest). Override with
+  `models[id].compat` (`null` drops it) and `models[id].thinkingLevelMap`.
 - **A stripped id can be a different model.** Its limits and `reasoning` can differ from the
   snapshot's; set `models[id]` `contextWindow`, `maxTokens` and `reasoning`, which win over the
   catalog. The placeholder-window warning ignores stripped matches.

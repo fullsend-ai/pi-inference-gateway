@@ -657,7 +657,7 @@ const CATALOG_PRIORITY = [
   "qwen-token-plan",
 ];
 
-interface CatalogIndex {
+export interface CatalogIndex {
   /** id → first match in CATALOG_PRIORITY order. */
   exact: Map<string, CatalogMatch>;
   /** Lowercased id → first match in CATALOG_PRIORITY order, for the case-insensitive pass. */
@@ -725,13 +725,16 @@ function candidateTiers(id: string): { primary: string[]; paths: string[]; unsuf
   const primary = tier(bases);
   const intermediate = intermediatePaths(id);
   const paths = tier(intermediate);
+  // Most specific first: the full id, its intermediate paths, then the bare model name.
   const unsuffixed = tier(
-    [...bases, ...intermediate].filter((base) => SNAPSHOT_SUFFIX_RE.test(base)).map((base) => base.replace(SNAPSHOT_SUFFIX_RE, "")),
+    [...new Set([id, ...intermediate, stripped])]
+      .filter((base) => SNAPSHOT_SUFFIX_RE.test(base))
+      .map((base) => base.replace(SNAPSHOT_SUFFIX_RE, "")),
   );
   return { primary, paths, unsuffixed };
 }
 
-/** The ids tried against pi's catalog, in order. Requests always use the original. */
+/** The exact-case ids tried against pi's catalog, in tier order (each tier is also tried lowercased). */
 export function catalogCandidates(id: string): string[] {
   const { primary, paths, unsuffixed } = candidateTiers(id);
   return [...primary, ...paths, ...unsuffixed];
@@ -755,8 +758,16 @@ function firstMatch(index: ReadonlyMap<string, CatalogMatch>, candidates: readon
  * paths; then all of those ignoring case; and only then with a snapshot suffix removed, exact case
  * before ignoring case. `snapshots: false` skips the suffix steps.
  */
-export function findCatalogModel(id: string, { snapshots = true }: { snapshots?: boolean } = {}): CatalogMatch | undefined {
-  const { exact, lowercase } = catalog();
+export function findCatalogModel(id: string, options: { snapshots?: boolean } = {}): CatalogMatch | undefined {
+  return matchCatalog(catalog(), id, options);
+}
+
+/** `findCatalogModel` against a given index. */
+export function matchCatalog(
+  { exact, lowercase }: CatalogIndex,
+  id: string,
+  { snapshots = true }: { snapshots?: boolean } = {},
+): CatalogMatch | undefined {
   const { primary, paths, unsuffixed } = candidateTiers(id);
   const lower = (ids: readonly string[]) => ids.map((candidate) => candidate.toLowerCase());
   const unstripped =
