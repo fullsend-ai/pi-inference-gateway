@@ -59,7 +59,7 @@ npm run ci
 - **No third-party catalog fetch** (no models.dev or similar). Metadata comes from the gateway, then
   pi's built-in catalog.
 - **Model ids are the gateway's ids, verbatim** — `vendor/model` included. Only the pi-catalog lookup
-  normalises them (leading path segments, a date suffix, case, `-`/`.` between digits).
+  strips a vendor prefix.
 - **No dependency-specific workarounds in code.** A gateway, backend or pi-transport problem is
   handled by config the user sets (`compat`, `thinkingLevelMap`, `contextWindow`, `maxTokens`,
   `authHeader` per model or API), a `docs/troubleshooting.md` entry, and an upstream issue to the
