@@ -657,24 +657,34 @@ const CATALOG_PRIORITY = [
   "qwen-token-plan",
 ];
 
-let catalogIndex: Map<string, CatalogMatch> | undefined;
+export interface CatalogIndex {
+  /** id → first match in CATALOG_PRIORITY order. */
+  exact: Map<string, CatalogMatch>;
+  /** Lowercased id → first match in CATALOG_PRIORITY order, for the case-insensitive pass. */
+  lowercase: Map<string, CatalogMatch>;
+}
 
-/** id → first match in CATALOG_PRIORITY order, built once. */
-function catalog(): Map<string, CatalogMatch> {
+let catalogIndex: CatalogIndex | undefined;
+
+/** pi's built-in catalog, indexed by id and by lowercased id, built once. */
+function catalog(): CatalogIndex {
   if (catalogIndex) return catalogIndex;
   const rank = (provider: string) => {
     const index = CATALOG_PRIORITY.indexOf(provider);
     return index >= 0 ? index : CATALOG_PRIORITY.length;
   };
   const providers = [...getBuiltinProviders()].sort((a, b) => rank(a) - rank(b));
-  const index = new Map<string, CatalogMatch>();
+  const exact = new Map<string, CatalogMatch>();
+  const lowercase = new Map<string, CatalogMatch>();
   for (const source of providers) {
     for (const model of getBuiltinModels(source)) {
-      if (!index.has(model.id)) index.set(model.id, { source, model });
+      if (!exact.has(model.id)) exact.set(model.id, { source, model });
+      const lower = model.id.toLowerCase();
+      if (!lowercase.has(lower)) lowercase.set(lower, { source, model });
     }
   }
-  catalogIndex = index;
-  return index;
+  catalogIndex = { exact, lowercase };
+  return catalogIndex;
 }
 
 /** `glm-5-3` ↔ `glm-5.3`: gateways and pi's catalog disagree on version separators. */
@@ -684,20 +694,54 @@ export function separatorVariants(id: string): string[] {
   return [...new Set([id, dotted, dashed])];
 }
 
-/** The ids tried against pi's catalog, most specific first. Requests always use the original. */
-export function catalogCandidates(id: string): string[] {
-  const stripped = stripVendorPrefix(id);
-  const bases = stripped === id ? [id] : [id, stripped];
-  return [...new Set(bases.flatMap(separatorVariants))];
+/**
+ * One trailing date-shaped snapshot suffix: `-MMDD` (`-1017`, `-0731`) or `-20YYMMDD` (`-20241022`).
+ * Context sizes (`-8192`) and year-month releases (`-2507`, `-2411`) are not dates, so they stay.
+ */
+const SNAPSHOT_SUFFIX_RE = /-(?:(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))$/;
+
+/** `a/b/c/d` → `b/c/d`, `c/d`: the paths between the full id and its last segment. */
+function intermediatePaths(id: string): string[] {
+  const segments = id.split("/");
+  const paths: string[] = [];
+  for (let start = 1; start < segments.length - 1; start++) paths.push(segments.slice(start).join("/"));
+  return paths;
 }
 
 /**
- * A pi built-in model for this id: exact id first, then without its `vendor/` prefix, then with
- * `-`/`.` swapped between digits — `anthropic`/`openai` hits win over any other provider's.
+ * The catalog candidates in three tiers, each with its `-`/`.` separator variants. `primary`: the
+ * exact id, then without its `vendor/` prefix. `paths`: each intermediate path. `unsuffixed`: each
+ * id so far with one snapshot suffix removed, tried last because a suffixed id can be its own model.
  */
-export function findCatalogModel(id: string): CatalogMatch | undefined {
-  const index = catalog();
-  const candidates = catalogCandidates(id);
+function candidateTiers(id: string): { primary: string[]; paths: string[]; unsuffixed: string[] } {
+  const stripped = stripVendorPrefix(id);
+  const bases = stripped === id ? [id] : [id, stripped];
+  const tried = new Set<string>();
+  const tier = (ids: readonly string[]) => {
+    const variants = [...new Set(ids.flatMap(separatorVariants))].filter((candidate) => candidate !== "" && !tried.has(candidate));
+    for (const candidate of variants) tried.add(candidate);
+    return variants;
+  };
+  const primary = tier(bases);
+  const intermediate = intermediatePaths(id);
+  const paths = tier(intermediate);
+  // Most specific first: the full id, its intermediate paths, then the bare model name.
+  const unsuffixed = tier(
+    [...new Set([id, ...intermediate, stripped])]
+      .filter((base) => SNAPSHOT_SUFFIX_RE.test(base))
+      .map((base) => base.replace(SNAPSHOT_SUFFIX_RE, "")),
+  );
+  return { primary, paths, unsuffixed };
+}
+
+/** The exact-case ids tried against pi's catalog, in tier order (each tier is also tried lowercased). */
+export function catalogCandidates(id: string): string[] {
+  const { primary, paths, unsuffixed } = candidateTiers(id);
+  return [...primary, ...paths, ...unsuffixed];
+}
+
+/** The first candidate's match, except that an `anthropic`/`openai` hit beats any other provider's. */
+function firstMatch(index: ReadonlyMap<string, CatalogMatch>, candidates: readonly string[]): CatalogMatch | undefined {
   let fallback: CatalogMatch | undefined;
   for (const candidate of candidates) {
     const match = index.get(candidate);
@@ -706,6 +750,30 @@ export function findCatalogModel(id: string): CatalogMatch | undefined {
     fallback ??= match;
   }
   return fallback;
+}
+
+/**
+ * A pi built-in model for this id, `anthropic`/`openai` hits winning within each step: the exact id,
+ * then without its `vendor/` prefix (each with `-`/`.` swapped between digits); then intermediate
+ * paths; then all of those ignoring case; and only then with a snapshot suffix removed, exact case
+ * before ignoring case. `snapshots: false` skips the suffix steps.
+ */
+export function findCatalogModel(id: string, options: { snapshots?: boolean } = {}): CatalogMatch | undefined {
+  return matchCatalog(catalog(), id, options);
+}
+
+/** `findCatalogModel` against a given index. */
+export function matchCatalog(
+  { exact, lowercase }: CatalogIndex,
+  id: string,
+  { snapshots = true }: { snapshots?: boolean } = {},
+): CatalogMatch | undefined {
+  const { primary, paths, unsuffixed } = candidateTiers(id);
+  const lower = (ids: readonly string[]) => ids.map((candidate) => candidate.toLowerCase());
+  const unstripped =
+    firstMatch(exact, primary) ?? firstMatch(exact, paths) ?? firstMatch(lowercase, lower([...primary, ...paths]));
+  if (unstripped || !snapshots) return unstripped;
+  return firstMatch(exact, unsuffixed) ?? firstMatch(lowercase, lower(unsuffixed));
 }
 
 function isClaudeId(id: string): boolean {
@@ -860,7 +928,7 @@ function withApi(
 
 /**
  * Build the pi model for one gateway entry. Per field, first defined wins:
- * config override → gateway fields → pi built-in model (same id, or id after `vendor/`) →
+ * config override → gateway fields → pi built-in model (`findCatalogModel`) →
  * defaults (128k context, 16k output, text only, no reasoning, zero cost).
  * The id is the gateway's, verbatim — it is what the gateway expects back in requests.
  */
@@ -939,7 +1007,8 @@ function placeholderWindowWarning(entries: readonly GatewayModelEntry[], config:
   for (const entry of entries) {
     const reported = entry.contextWindow;
     if (reported === undefined || modelOverride(config, entry.id)?.contextWindow !== undefined) continue;
-    const known = findCatalogModel(entry.id)?.model.contextWindow;
+    // A snapshot's own window may differ from its base model's, so only unstripped matches count.
+    const known = findCatalogModel(entry.id, { snapshots: false })?.model.contextWindow;
     if (!known || Math.max(reported, known) < 4 * Math.min(reported, known)) continue;
     suspicious.push(`${entry.id} (gateway ${reported}, pi's catalog ${known})`);
     if ((shared.get(reported) ?? 0) >= 3) repeated.add(reported);

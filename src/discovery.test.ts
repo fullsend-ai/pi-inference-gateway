@@ -17,6 +17,7 @@ import {
   findCatalogModel,
   globMatch,
   isIncluded,
+  matchCatalog,
   mergeModelLists,
   modelsFromList,
   parseModelEntry,
@@ -25,6 +26,7 @@ import {
   separatorVariants,
   stripVendorPrefix,
 } from "./discovery.ts";
+import type { CatalogIndex, CatalogMatch } from "./discovery.ts";
 
 function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
@@ -544,13 +546,185 @@ describe("separatorVariants / catalogCandidates", () => {
     assert.deepEqual(separatorVariants("claude-haiku-4-5"), ["claude-haiku-4-5", "claude-haiku-4.5"]);
   });
 
-  it("tries the exact id (and its variants), then without the vendor prefix", () => {
-    assert.deepEqual(catalogCandidates("oss/zai-org/glm-5-3"), ["oss/zai-org/glm-5-3", "oss/zai-org/glm-5.3", "glm-5-3", "glm-5.3"]);
+  it("tries the exact id (and its variants), then without the vendor prefix, then the intermediate path", () => {
+    assert.deepEqual(catalogCandidates("oss/zai-org/glm-5-3"), [
+      "oss/zai-org/glm-5-3",
+      "oss/zai-org/glm-5.3",
+      "glm-5-3",
+      "glm-5.3",
+      "zai-org/glm-5-3",
+      "zai-org/glm-5.3",
+    ]);
   });
 
   it("prefers an anthropic/openai hit over any other provider's", () => {
     assert.equal(findCatalogModel(ANTHROPIC_ID)?.source, "anthropic");
     assert.equal(findCatalogModel(OPENAI_ID)?.source, "openai");
+  });
+
+  it("adds intermediate paths, then snapshot-stripped ids, after today's candidates", () => {
+    assert.deepEqual(catalogCandidates("oss/deepseek-ai/DeepSeek-V4.1-Flash-1017"), [
+      // today's candidates, in today's order
+      "oss/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+      "oss/deepseek-ai/DeepSeek-V4-1-Flash-1017",
+      "DeepSeek-V4.1-Flash-1017",
+      "DeepSeek-V4-1-Flash-1017",
+      // intermediate path
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+      "deepseek-ai/DeepSeek-V4-1-Flash-1017",
+      // the snapshot suffix removed, most specific first
+      "oss/deepseek-ai/DeepSeek-V4.1-Flash",
+      "oss/deepseek-ai/DeepSeek-V4-1-Flash",
+      "deepseek-ai/DeepSeek-V4.1-Flash",
+      "deepseek-ai/DeepSeek-V4-1-Flash",
+      "DeepSeek-V4.1-Flash",
+      "DeepSeek-V4-1-Flash",
+    ]);
+    assert.deepEqual(catalogCandidates("a/b/c/d"), ["a/b/c/d", "d", "b/c/d", "c/d"]);
+  });
+
+  it("strips one trailing -MMDD or -20YYMMDD snapshot suffix and nothing else", () => {
+    assert.deepEqual(catalogCandidates("m-1017"), ["m-1017", "m"]);
+    assert.deepEqual(catalogCandidates("m-0731"), ["m-0731", "m"]);
+    assert.deepEqual(catalogCandidates("m-1024"), ["m-1024", "m"], "a valid MMDD, so a 1024 context size is stripped too");
+    assert.deepEqual(catalogCandidates("m-20241022"), ["m-20241022", "m"]);
+    assert.deepEqual(catalogCandidates("m-0731-1017"), ["m-0731-1017", "m-0731.1017", "m-0731"], "only one suffix");
+    // Not dates: a context size, year-month releases, impossible months and days, a 19xx year.
+    for (const id of ["m-8192", "m-4096", "m-2507", "m-2411", "m-1332", "m-0000", "m-19991231", "m-20241399"]) {
+      assert.deepEqual(catalogCandidates(id), [id], id);
+    }
+    for (const id of ["m-v2", "m-4o", "m-123", "m-12345", "m-123456", "m.1017"]) {
+      assert.deepEqual(catalogCandidates(id), [id], id);
+    }
+  });
+});
+
+describe("findCatalogModel: mid-path, snapshot and case-insensitive matches", () => {
+  const DEEPSEEK_ID = "oss/deepseek-ai/DeepSeek-V4.1-Flash-1017";
+  const catalogIds = new Set(getBuiltinProviders().flatMap((provider) => getBuiltinModels(provider).map((model) => model.id)));
+
+  it("matches a routed, snapshot-suffixed, mixed-case id", () => {
+    const match = findCatalogModel(DEEPSEEK_ID);
+    assert.ok(match, `${DEEPSEEK_ID} should match pi's deepseek-ai/DeepSeek-V4.1-Flash`);
+    assert.ok(match.model.contextWindow >= 1_000_000, String(match.model.contextWindow));
+    assert.equal(match.model.reasoning, true);
+  });
+
+  it("buildModel takes the window and reasoning from that match, not the defaults", () => {
+    const parsed = parseModelEntry({ id: DEEPSEEK_ID });
+    assert.ok(parsed);
+    const match = findCatalogModel(DEEPSEEK_ID);
+    assert.ok(match);
+    const model = buildModel(parsed, config());
+    assert.equal(model.id, DEEPSEEK_ID, "the request id stays verbatim");
+    assert.equal(model.contextWindow, match.model.contextWindow);
+    assert.notEqual(model.contextWindow, DEFAULTS.contextWindow);
+    assert.equal(model.reasoning, true);
+    assert.equal(model.maxTokens, Math.min(match.model.maxTokens, match.model.contextWindow));
+  });
+
+  it("a config models[id] override still wins over the match", () => {
+    const parsed = parseModelEntry({ id: DEEPSEEK_ID });
+    assert.ok(parsed);
+    const model = buildModel(parsed, config({ models: { [DEEPSEEK_ID]: { contextWindow: 65_536, reasoning: false } } }));
+    assert.equal(model.contextWindow, 65_536);
+    assert.equal(model.reasoning, false);
+  });
+
+  it("keeps a snapshot pi lists over the stripped id", () => {
+    const snapshot = [...catalogIds].find((id) => /-\d{4}$/.test(id) && catalogIds.has(id.replace(/-\d{4}$/, "")));
+    assert.ok(snapshot, "pi's catalog no longer lists a model both with and without a -NNNN snapshot; drop this case");
+    assert.equal(findCatalogModel(snapshot)?.model.id, snapshot);
+  });
+
+  it("an id that matches today keeps the same match", () => {
+    const glm = findCatalogModel("oss/zai-org/glm-5-3");
+    assert.equal(glm?.source, "zai");
+    assert.equal(glm?.model.id, "glm-5.3");
+    assert.equal(findCatalogModel(`anthropic/${ANTHROPIC_ID}`)?.source, "anthropic");
+    assert.equal(findCatalogModel(`anthropic/${ANTHROPIC_ID}`)?.model.id, ANTHROPIC_ID);
+    assert.equal(findCatalogModel(`openai/${OPENAI_ID}`)?.source, "openai");
+    assert.equal(findCatalogModel(`openai/${OPENAI_ID}`)?.model.id, OPENAI_ID);
+    // Every id one of today's candidates matches (each catalog id, bare or behind a routing prefix)
+    // still resolves through today's candidates, never a new one.
+    for (const id of catalogIds) {
+      for (const gatewayId of [id, `gw/${id}`]) {
+        const today = [...new Set([gatewayId, stripVendorPrefix(gatewayId)].flatMap(separatorVariants))];
+        if (!today.some((candidate) => catalogIds.has(candidate))) continue;
+        const match = findCatalogModel(gatewayId);
+        assert.ok(match && today.includes(match.model.id), gatewayId);
+      }
+    }
+  });
+
+  it("matches ignoring case only after every exact-case candidate missed", () => {
+    const exact = "deepseek-ai/DeepSeek-V4.1-Flash";
+    const lower = "deepseek-v4.1-flash";
+    assert.ok(catalogIds.has(exact) && catalogIds.has(lower), "pi's catalog changed; pick another mixed-case pair");
+    // DeepSeek-V4.1-Flash (a candidate before deepseek-ai/DeepSeek-V4.1-Flash) matches `lower` when
+    // case is ignored; the later exact-case candidate must still win.
+    assert.equal(findCatalogModel(DEEPSEEK_ID)?.model.id, exact);
+    assert.equal(findCatalogModel("DeepSeek-V4.1-Flash")?.model.id, lower);
+    assert.equal(findCatalogModel("DEEPSEEK-AI/DEEPSEEK-V4.1-FLASH")?.model.id, exact);
+  });
+
+  it("a year-month release keeps its own entry, not its base model's", () => {
+    // -2507 is not a date, so it is never stripped; pi lists the release with its own window.
+    const release = findCatalogModel("Qwen/Qwen3-235B-A22B-2507");
+    const base = findCatalogModel("Qwen/Qwen3-235B-A22B");
+    assert.ok(release && base, "pi's catalog changed; pick another release/base pair");
+    assert.equal(release.model.id, "qwen/qwen3-235b-a22b-2507");
+    assert.notEqual(release.model.contextWindow, base.model.contextWindow);
+  });
+
+  it("tries every unstripped id ignoring case before stripping a suffix", () => {
+    // No pi catalog pair tells the orders apart, so use a two-entry index.
+    const entry = (id: string): CatalogMatch => ({ source: "other", model: { ...getBuiltinModels("anthropic")[0], id } });
+    const index: CatalogIndex = {
+      exact: new Map([["M-1017", entry("M-1017")], ["m", entry("m")]]),
+      lowercase: new Map([["m-1017", entry("M-1017")], ["m", entry("m")]]),
+    };
+    assert.equal(matchCatalog(index, "m-1017")?.model.id, "M-1017");
+    assert.equal(matchCatalog(index, "x/m-1017")?.model.id, "M-1017");
+    assert.equal(matchCatalog(index, "m-0731")?.model.id, "m", "only a stripped hit left");
+    assert.equal(matchCatalog(index, "m-0731", { snapshots: false }), undefined);
+  });
+
+  it("resolves through an intermediate path, and through case on a suffixed id", () => {
+    assert.equal(findCatalogModel("oss/deepseek-ai/DeepSeek-V4.1-Flash")?.model.id, "deepseek-ai/DeepSeek-V4.1-Flash");
+    const shouted = findCatalogModel("OSS/DEEPSEEK-AI/DEEPSEEK-V4.1-FLASH-1017");
+    assert.equal(shouted?.model.id.toLowerCase(), "deepseek-ai/deepseek-v4.1-flash", "the most specific stripped path, ignoring case");
+  });
+
+  it("a new match also picks the transport", () => {
+    // defaultApi is completions, so only a catalog match can send an id to Responses or Messages.
+    const api = (id: string) => {
+      const parsed = parseModelEntry({ id });
+      assert.ok(parsed);
+      return buildModel(parsed, config({ defaultApi: "openai-completions" })).api;
+    };
+    assert.equal(api(DEEPSEEK_ID), "openai-completions", "another provider's catalog entry → chat completions");
+    assert.equal(api("GPT-4o"), "openai-responses", "an openai catalog entry, matched ignoring case");
+    assert.equal(api("Claude-Sonnet-4-5"), "anthropic-messages", "an anthropic catalog entry, matched ignoring case");
+  });
+
+  it("the placeholder-window warning ignores snapshot-stripped matches", () => {
+    // DeepSeek's stripped match has a 1M window; a gateway reporting 128K for the snapshot is not a placeholder.
+    const { warnings } = modelsFromList(
+      { data: [{ id: DEEPSEEK_ID, context_window: 131_072 }, { id: "other-a", context_window: 131_072 }, { id: "other-b", context_window: 131_072 }] },
+      config(),
+    );
+    assert.deepEqual(warnings, []);
+  });
+
+  it("an id matching nothing is still undefined, so the defaults apply", () => {
+    assert.equal(findCatalogModel("oss/no-vendor/No-Such-Model-1017"), undefined);
+    const parsed = parseModelEntry({ id: "oss/no-vendor/No-Such-Model-1017" });
+    assert.ok(parsed);
+    const model = buildModel(parsed, config());
+    assert.equal(model.contextWindow, DEFAULTS.contextWindow);
+    assert.equal(model.maxTokens, DEFAULTS.maxTokens);
+    assert.equal(model.reasoning, false);
   });
 });
 

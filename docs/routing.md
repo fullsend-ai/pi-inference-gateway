@@ -26,7 +26,31 @@ everything: [agentgateway](gateways/agentgateway.md) lists every model, Claude i
 `owned_by: "openai"`.
 
 Catalog lookups also try the id without a `vendor/` prefix and with `-`/`.` swapped between digits,
-so `oss/zai-org/glm-5-3` finds pi's `glm-5.3`. The gateway's id is always what is sent back.
+so `oss/zai-org/glm-5-3` finds pi's `glm-5.3`. Only when none of those match, they try, in order
+(each again with `-`/`.` swapped):
+
+1. every intermediate path, dropping leading segments one at a time (`a/b/c/d` → `b/c/d`, `c/d`);
+2. all of the above again, ignoring case;
+3. every id so far with one trailing date suffix removed, exact case first, then ignoring case. A
+   date suffix is `-MMDD` or `-20YYMMDD` (`-1017`, `-0731`, `-20241022`); `-8192` or `-2507` is not
+   one, so it stays.
+
+So `oss/deepseek-ai/DeepSeek-V4.1-Flash-1017` finds pi's `deepseek-ai/DeepSeek-V4.1-Flash`. An id
+that matches without these rules keeps the same match, and the gateway's id is always what is sent
+back.
+
+A match from these rules counts like any other:
+
+- **It picks the transport**, by rules 3 and 6 of the list at the top of this page. An id that used
+  to fall through to `defaultApi` can move: with `defaultApi` set to `openai-completions`, `GPT-4o`
+  now goes to `/v1/responses`. Pin one with `models[id].api`.
+- **It can bring that entry's `compat` and `thinkingLevelMap`**, when the entry is on the same
+  transport. When several providers list the id, this extension's provider priority picks one
+  (`anthropic`, `openai`, then first-party vendors, then the rest). Override with
+  `models[id].compat` (`null` drops it) and `models[id].thinkingLevelMap`.
+- **A stripped id can be a different model.** Its limits and `reasoning` can differ from the
+  snapshot's; set `models[id]` `contextWindow`, `maxTokens` and `reasoning`, which win over the
+  catalog. The placeholder-window warning ignores stripped matches.
 
 Model metadata (context window, max output, reasoning, image input, cost) comes from the config,
 then the gateway's own fields (`context_window`, `max_input_tokens`, `max_output_tokens`,

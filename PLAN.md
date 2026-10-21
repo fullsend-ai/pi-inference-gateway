@@ -272,7 +272,7 @@ Adopted from the research survey's adopt list:
    1000-model cap.
 4. Opt-in `sessionAffinity`: pi's `sendSessionAffinityHeaders` compat on Messages/Completions, the
    session id hashed in the request options, `prompt_cache_key` on Completions via `onPayload`.
-5. Persisted snapshots carry `etag: "pi-inference-gateway/2"` (`SNAPSHOT_STAMP`); an unstamped or
+5. Persisted snapshots carry `etag: "pi-inference-gateway/3"` (`SNAPSHOT_STAMP`); an unstamped or
    older snapshot has its `api` re-derived. `etag` is used because `ModelsStoreEntry` has no other
    free-form field and pi reads it only in the remote-catalog wrapper around built-in providers.
    Bump the stamp whenever selectApi changes.
@@ -327,6 +327,7 @@ keyed on a vendor, model id, owner or backend:
 | Gateway `api` / endpoint hints | `selectApi`, `apiFromEndpoints` | routing | kept | The gateway describing its own models. |
 | pi catalog under `anthropic` → messages, `openai` → responses, other → completions | `selectApi`, `findCatalogModel`, `CATALOG_PRIORITY` | routing | kept | Describes which protocol a model speaks; a gateway exposes only the three. |
 | `claude-` id prefix → messages | `isClaudeId` | routing | kept | Describes the model family's native protocol. |
+| Catalog id normalisation: leading path segments, one `-MMDD`/`-20YYMMDD` suffix, case | `candidateTiers`, `SNAPSHOT_SUFFIX_RE`, `matchCatalog` | id shape | kept | General: id shapes any gateway uses (routing prefixes, snapshot dates); no vendor or model named. |
 | Owner hints (`anthropic*`, `openai*`, `azure`) | `isAnthropicOwner`, `isOpenAIOwner` | routing | kept | Describes the model. |
 | `AMBIGUOUS_OWNERS` (`vertex`, `bedrock`, `openrouter`, `system`, ...) | `discovery.ts` | routing | kept | Hosting/aggregator owners say nothing about the protocol. |
 | `compat` / `thinkingLevelMap` copied only from a catalog entry on the same transport | `withApi` | metadata | kept | General: both describe how one transport shapes a request. |
