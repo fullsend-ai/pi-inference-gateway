@@ -694,8 +694,11 @@ export function separatorVariants(id: string): string[] {
   return [...new Set([id, dotted, dashed])];
 }
 
-/** `-1017`, `-0731`, `-20241022`: one trailing snapshot suffix, `-` and exactly 4 or 8 digits. */
-const SNAPSHOT_SUFFIX_RE = /-(?:\d{4}|\d{8})$/;
+/**
+ * One trailing date-shaped snapshot suffix: `-MMDD` (`-1017`, `-0731`) or `-20YYMMDD` (`-20241022`).
+ * Context sizes (`-8192`) and year-month releases (`-2507`, `-2411`) are not dates, so they stay.
+ */
+const SNAPSHOT_SUFFIX_RE = /-(?:(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))$/;
 
 /** `a/b/c/d` → `b/c/d`, `c/d`: the paths between the full id and its last segment. */
 function intermediatePaths(id: string): string[] {
@@ -706,29 +709,32 @@ function intermediatePaths(id: string): string[] {
 }
 
 /**
- * The catalog candidates in two tiers. `primary`: the exact id, then without its `vendor/` prefix.
- * `wider`, tried only when every primary candidate misses: each intermediate path, then each id so
- * far with one trailing snapshot suffix removed. Every id gets its `-`/`.` separator variants.
+ * The catalog candidates in three tiers, each with its `-`/`.` separator variants. `primary`: the
+ * exact id, then without its `vendor/` prefix. `paths`: each intermediate path. `unsuffixed`: each
+ * id so far with one snapshot suffix removed, tried last because a suffixed id can be its own model.
  */
-function candidateTiers(id: string): { primary: string[]; wider: string[] } {
+function candidateTiers(id: string): { primary: string[]; paths: string[]; unsuffixed: string[] } {
   const stripped = stripVendorPrefix(id);
   const bases = stripped === id ? [id] : [id, stripped];
-  const primary = [...new Set(bases.flatMap(separatorVariants))];
-  const paths = intermediatePaths(id);
-  const unsuffixed = [...bases, ...paths]
-    .filter((base) => SNAPSHOT_SUFFIX_RE.test(base))
-    .map((base) => base.replace(SNAPSHOT_SUFFIX_RE, ""));
-  const tried = new Set(primary);
-  const wider = [...new Set([...paths, ...unsuffixed].flatMap(separatorVariants))].filter(
-    (candidate) => !tried.has(candidate),
+  const tried = new Set<string>();
+  const tier = (ids: readonly string[]) => {
+    const variants = [...new Set(ids.flatMap(separatorVariants))].filter((candidate) => candidate !== "" && !tried.has(candidate));
+    for (const candidate of variants) tried.add(candidate);
+    return variants;
+  };
+  const primary = tier(bases);
+  const intermediate = intermediatePaths(id);
+  const paths = tier(intermediate);
+  const unsuffixed = tier(
+    [...bases, ...intermediate].filter((base) => SNAPSHOT_SUFFIX_RE.test(base)).map((base) => base.replace(SNAPSHOT_SUFFIX_RE, "")),
   );
-  return { primary, wider };
+  return { primary, paths, unsuffixed };
 }
 
 /** The ids tried against pi's catalog, in order. Requests always use the original. */
 export function catalogCandidates(id: string): string[] {
-  const { primary, wider } = candidateTiers(id);
-  return [...primary, ...wider];
+  const { primary, paths, unsuffixed } = candidateTiers(id);
+  return [...primary, ...paths, ...unsuffixed];
 }
 
 /** The first candidate's match, except that an `anthropic`/`openai` hit beats any other provider's. */
@@ -744,19 +750,19 @@ function firstMatch(index: ReadonlyMap<string, CatalogMatch>, candidates: readon
 }
 
 /**
- * A pi built-in model for this id: exact id first, then without its `vendor/` prefix, then with
- * `-`/`.` swapped between digits — `anthropic`/`openai` hits win over any other provider's. Only
- * when all of those miss: intermediate `vendor/model` paths and snapshot-suffix-stripped ids; and
- * only when those miss too, every candidate again ignoring case.
+ * A pi built-in model for this id, `anthropic`/`openai` hits winning within each step: the exact id,
+ * then without its `vendor/` prefix (each with `-`/`.` swapped between digits); then intermediate
+ * paths; then all of those ignoring case; and only then with a snapshot suffix removed, exact case
+ * before ignoring case. `snapshots: false` skips the suffix steps.
  */
-export function findCatalogModel(id: string): CatalogMatch | undefined {
+export function findCatalogModel(id: string, { snapshots = true }: { snapshots?: boolean } = {}): CatalogMatch | undefined {
   const { exact, lowercase } = catalog();
-  const { primary, wider } = candidateTiers(id);
-  return (
-    firstMatch(exact, primary) ??
-    firstMatch(exact, wider) ??
-    firstMatch(lowercase, [...primary, ...wider].map((candidate) => candidate.toLowerCase()))
-  );
+  const { primary, paths, unsuffixed } = candidateTiers(id);
+  const lower = (ids: readonly string[]) => ids.map((candidate) => candidate.toLowerCase());
+  const unstripped =
+    firstMatch(exact, primary) ?? firstMatch(exact, paths) ?? firstMatch(lowercase, lower([...primary, ...paths]));
+  if (unstripped || !snapshots) return unstripped;
+  return firstMatch(exact, unsuffixed) ?? firstMatch(lowercase, lower(unsuffixed));
 }
 
 function isClaudeId(id: string): boolean {
@@ -990,7 +996,8 @@ function placeholderWindowWarning(entries: readonly GatewayModelEntry[], config:
   for (const entry of entries) {
     const reported = entry.contextWindow;
     if (reported === undefined || modelOverride(config, entry.id)?.contextWindow !== undefined) continue;
-    const known = findCatalogModel(entry.id)?.model.contextWindow;
+    // A snapshot's own window may differ from its base model's, so only unstripped matches count.
+    const known = findCatalogModel(entry.id, { snapshots: false })?.model.contextWindow;
     if (!known || Math.max(reported, known) < 4 * Math.min(reported, known)) continue;
     suspicious.push(`${entry.id} (gateway ${reported}, pi's catalog ${known})`);
     if ((shared.get(reported) ?? 0) >= 3) repeated.add(reported);

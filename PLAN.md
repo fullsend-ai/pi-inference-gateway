@@ -272,7 +272,7 @@ Adopted from the research survey's adopt list:
    1000-model cap.
 4. Opt-in `sessionAffinity`: pi's `sendSessionAffinityHeaders` compat on Messages/Completions, the
    session id hashed in the request options, `prompt_cache_key` on Completions via `onPayload`.
-5. Persisted snapshots carry `etag: "pi-inference-gateway/2"` (`SNAPSHOT_STAMP`); an unstamped or
+5. Persisted snapshots carry `etag: "pi-inference-gateway/3"` (`SNAPSHOT_STAMP`); an unstamped or
    older snapshot has its `api` re-derived. `etag` is used because `ModelsStoreEntry` has no other
    free-form field and pi reads it only in the remote-catalog wrapper around built-in providers.
    Bump the stamp whenever selectApi changes.

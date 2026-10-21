@@ -581,10 +581,15 @@ describe("separatorVariants / catalogCandidates", () => {
     assert.deepEqual(catalogCandidates("a/b/c/d"), ["a/b/c/d", "d", "b/c/d", "c/d"]);
   });
 
-  it("strips one trailing -NNNN or -NNNNNNNN snapshot suffix and nothing else", () => {
+  it("strips one trailing -MMDD or -20YYMMDD snapshot suffix and nothing else", () => {
     assert.deepEqual(catalogCandidates("m-1017"), ["m-1017", "m"]);
+    assert.deepEqual(catalogCandidates("m-0731"), ["m-0731", "m"]);
     assert.deepEqual(catalogCandidates("m-20241022"), ["m-20241022", "m"]);
     assert.deepEqual(catalogCandidates("m-0731-1017"), ["m-0731-1017", "m-0731.1017", "m-0731"], "only one suffix");
+    // Not dates: a context size, year-month releases, impossible months and days, a 19xx year.
+    for (const id of ["m-8192", "m-4096", "m-2507", "m-2411", "m-1332", "m-0000", "m-19991231", "m-20241399"]) {
+      assert.deepEqual(catalogCandidates(id), [id], id);
+    }
     for (const id of ["m-v2", "m-4o", "m-123", "m-12345", "m-123456", "m.1017"]) {
       assert.deepEqual(catalogCandidates(id), [id], id);
     }
@@ -658,6 +663,33 @@ describe("findCatalogModel: mid-path, snapshot and case-insensitive matches", ()
     assert.equal(findCatalogModel(DEEPSEEK_ID)?.model.id, exact);
     assert.equal(findCatalogModel("DeepSeek-V4.1-Flash")?.model.id, lower);
     assert.equal(findCatalogModel("DEEPSEEK-AI/DEEPSEEK-V4.1-FLASH")?.model.id, exact);
+  });
+
+  it("a year-month release keeps its own entry, not its base model's", () => {
+    // -2507 is not a date, so it is never stripped; pi lists the release with its own window.
+    const release = findCatalogModel("Qwen/Qwen3-235B-A22B-2507");
+    assert.equal(release?.model.id, "qwen/qwen3-235b-a22b-2507");
+    assert.notEqual(release?.model.contextWindow, findCatalogModel("Qwen/Qwen3-235B-A22B")?.model.contextWindow);
+  });
+
+  it("a new match also picks the transport", () => {
+    const api = (id: string) => {
+      const parsed = parseModelEntry({ id });
+      assert.ok(parsed);
+      return buildModel(parsed, config()).api;
+    };
+    assert.equal(api(DEEPSEEK_ID), "openai-completions", "another provider's catalog entry → chat completions");
+    assert.equal(api("GPT-4o"), "openai-responses", "an openai catalog entry, matched ignoring case");
+    assert.equal(api("Claude-Sonnet-4-5"), "anthropic-messages", "an anthropic catalog entry, matched ignoring case");
+  });
+
+  it("the placeholder-window warning ignores snapshot-stripped matches", () => {
+    // DeepSeek's stripped match has a 1M window; a gateway reporting 128K for the snapshot is not a placeholder.
+    const { warnings } = modelsFromList(
+      { data: [{ id: DEEPSEEK_ID, context_window: 131_072 }, { id: "other-a", context_window: 131_072 }, { id: "other-b", context_window: 131_072 }] },
+      config(),
+    );
+    assert.deepEqual(warnings, []);
   });
 
   it("an id matching nothing is still undefined, so the defaults apply", () => {
