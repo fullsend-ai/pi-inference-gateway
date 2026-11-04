@@ -35,7 +35,7 @@ so `oss/zai-org/glm-5-3` finds pi's `glm-5.3`. Only when none of those match, th
    date suffix is `-MMDD` or `-20YYMMDD` (`-1017`, `-0731`, `-20241022`); `-8192` or `-2507` is not
    one, so it stays.
 
-So `oss/deepseek-ai/DeepSeek-V4.1-Flash-1017` finds pi's `deepseek-ai/DeepSeek-V4.1-Flash`. An id
+So `oss/deepseek-ai/DeepSeek-V4.1-Flash-0731` finds pi's `deepseek-ai/DeepSeek-V4.1-Flash`. An id
 that matches without these rules keeps the same match, and the gateway's id is always what is sent
 back.
 

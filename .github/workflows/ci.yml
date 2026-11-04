@@ -15,13 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 0.99.2 is fullsend's sandbox image pin (images/sandbox/Containerfile ARG PI_VERSION);
-        # 1.1.0 is the latest pi release. This matrix is the compatibility check: the extension
+        # 1.3.0 is fullsend's sandbox image pin (images/sandbox/Containerfile ARG PI_VERSION);
+        # 1.5.0 is the latest pi release. This matrix is the compatibility check: the extension
         # mirrors no pi internals, so a pi release can only break it through the public
         # `createProvider` / lazy transport / `getBuiltinModels` surface — which is exactly what
         # the tests exercise. Bump the newer entry when pi releases; move the older one when
         # fullsend moves its pin.
-        pi: ["0.99.2", "1.1.0"]
+        pi: ["1.3.0", "1.5.0"]
     name: ci (pi ${{ matrix.pi }})
     steps:
       - uses: actions/checkout@v5

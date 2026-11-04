@@ -600,7 +600,7 @@ describe("separatorVariants / catalogCandidates", () => {
 });
 
 describe("findCatalogModel: mid-path, snapshot and case-insensitive matches", () => {
-  const DEEPSEEK_ID = "oss/deepseek-ai/DeepSeek-V4.1-Flash-1017";
+  const DEEPSEEK_ID = "oss/deepseek-ai/DeepSeek-V4.1-Flash-0731";
   const catalogIds = new Set(getBuiltinProviders().flatMap((provider) => getBuiltinModels(provider).map((model) => model.id)));
 
   it("matches a routed, snapshot-suffixed, mixed-case id", () => {
@@ -692,7 +692,7 @@ describe("findCatalogModel: mid-path, snapshot and case-insensitive matches", ()
 
   it("resolves through an intermediate path, and through case on a suffixed id", () => {
     assert.equal(findCatalogModel("oss/deepseek-ai/DeepSeek-V4.1-Flash")?.model.id, "deepseek-ai/DeepSeek-V4.1-Flash");
-    const shouted = findCatalogModel("OSS/DEEPSEEK-AI/DEEPSEEK-V4.1-FLASH-1017");
+    const shouted = findCatalogModel("OSS/DEEPSEEK-AI/DEEPSEEK-V4.1-FLASH-0731");
     assert.equal(shouted?.model.id.toLowerCase(), "deepseek-ai/deepseek-v4.1-flash", "the most specific stripped path, ignoring case");
   });
 
