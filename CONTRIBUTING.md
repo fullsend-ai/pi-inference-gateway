@@ -3,7 +3,7 @@
 ## Setup
 
 ```bash
-npm ci          # installs pi 0.99.2 as a devDependency — tsc and the tests need its types
+npm ci          # installs pi 1.5.0 as a devDependency — tsc and the tests need its types
 npm run ci      # lint + test; must pass before any commit
 ```
 
@@ -137,8 +137,8 @@ and stay. PLAN.md, "Generality audit", lists every vendor-, id- or backend-speci
 
 ## The CI matrix replaces a compat file
 
-`ci.yml` runs the suite against each supported pi version (`0.99.2`, fullsend's sandbox pin, and
-`1.1.0`) by installing it over the lockfile's:
+`ci.yml` runs the suite against each supported pi version (`1.3.0`, fullsend's sandbox pin, and
+`1.5.0`) by installing it over the lockfile's:
 
 ```bash
 npm install --no-save --ignore-scripts @earendil-works/pi-ai@$V @earendil-works/pi-coding-agent@$V
@@ -236,8 +236,8 @@ by body `model`, text/plain 400/401 errors; see [agentgateway](docs/gateways/age
 oldest pi in the matrix:
 
 ```bash
-mkdir -p /tmp/pi0992 && npm --prefix /tmp/pi0992 install --ignore-scripts @earendil-works/pi-coding-agent@0.99.2
-node /tmp/pi0992/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js -ne -e . --list-models
+mkdir -p /tmp/pi130 && npm --prefix /tmp/pi130 install --ignore-scripts @earendil-works/pi-coding-agent@1.3.0
+node /tmp/pi130/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js -ne -e . --list-models
 ```
 
 ## Before you commit

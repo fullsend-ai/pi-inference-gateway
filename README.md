@@ -80,7 +80,7 @@ built-in `anthropic` provider, which wants its own key.
 
 ## Requirements
 
-- pi ≥ 0.99.2 (CI runs 0.99.2 and 1.1.0 on every commit)
+- pi ≥ 1.3.0 (CI runs 1.3.0 and 1.5.0 on every commit)
 - A gateway exposing a model list (OpenAI- or Anthropic-format) at the models path, and at least
   one of `/v1/messages`, `/v1/responses`, `/v1/chat/completions`
 
