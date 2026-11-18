@@ -48,7 +48,3 @@ inference:
         models:
             gpt-6.1-sol:
                 api: openai-responses
-models:
-    aliases:
-        opus: claude-opus-5-5
-        sonnet: claude-sonnet-5-5
