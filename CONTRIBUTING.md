@@ -3,7 +3,7 @@
 ## Setup
 
 ```bash
-npm ci          # installs pi 1.5.0 as a devDependency — tsc and the tests need its types
+npm ci          # installs pi 1.6.0 as a devDependency — tsc and the tests need its types
 npm run ci      # lint + test; must pass before any commit
 ```
 
@@ -137,8 +137,8 @@ and stay. PLAN.md, "Generality audit", lists every vendor-, id- or backend-speci
 
 ## The CI matrix replaces a compat file
 
-`ci.yml` runs the suite against each supported pi version (`1.3.0`, fullsend's sandbox pin, and
-`1.5.0`) by installing it over the lockfile's:
+`ci.yml` runs the suite against each supported pi version (`1.3.0`, the peer floor; `1.5.0`,
+fullsend's sandbox pin; and `1.6.0`, the latest release) by installing it over the lockfile's:
 
 ```bash
 npm install --no-save --ignore-scripts @earendil-works/pi-ai@$V @earendil-works/pi-coding-agent@$V
