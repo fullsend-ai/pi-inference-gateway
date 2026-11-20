@@ -17,13 +17,16 @@ npm ci          # installs pi as a devDependency; tsc and the tests need its typ
 npm run ci      # lint + test — must pass before any commit
 ```
 
-`npm ci` installs the lockfile's pi (1.5.0). CI runs against each pi version in its matrix
-(1.3.0, which is what fullsend's sandbox runs, and 1.5.0); check both explicitly before pushing:
+`npm ci` installs the lockfile's pi (1.6.0). CI runs against each pi version in its matrix
+(1.3.0, the peer floor; 1.5.0, which is what fullsend's sandbox runs; and 1.6.0, the latest
+release); check each explicitly before pushing:
 
 ```bash
 npm install --no-save --ignore-scripts @earendil-works/pi-ai@1.3.0 @earendil-works/pi-coding-agent@1.3.0
 npm run ci
-npm ci   # back to the lockfile's 1.5.0
+npm install --no-save --ignore-scripts @earendil-works/pi-ai@1.5.0 @earendil-works/pi-coding-agent@1.5.0
+npm run ci
+npm ci   # back to the lockfile's 1.6.0
 npm run ci
 ```
 
