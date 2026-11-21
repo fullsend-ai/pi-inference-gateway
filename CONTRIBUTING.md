@@ -77,7 +77,7 @@ it, and its own `refreshModels` replaces it on a successful fetch (persisting th
 always through `rebindModels()`, which keeps id and metadata but takes base URL, headers, overrides
 and filters from the *current* config.
 
-### One provider, three transports
+### One provider, four transports (one opt-in)
 
 `createProvider`'s `api` may be a map keyed by `model.api`. Each entry is pi's own lazy transport
 from `@earendil-works/pi-ai/compat` (`anthropicMessagesApi`, `openAIResponsesApi`,

@@ -110,6 +110,8 @@ For agentgateway-specific errors, see
   (for example `model_not_allowed`) there means it does not, even when the same model works on
   chat completions. Older pi refuses the extension's request wrapper on that transport, so the
   model fails with `Custom fetch is not supported by the Google Generative AI adapter` and nothing
-  is sent. See [Native Gemini route](routing.md#native-gemini-route).
+  is sent. A `404` on `/v1/publishers/google/models/<model>:streamGenerateContent` means
+  `GOOGLE_GENAI_USE_VERTEXAI` or `GOOGLE_GENAI_USE_ENTERPRISE` is set in pi's environment: unset
+  both. See [Native Gemini route](routing.md#native-gemini-route).
 - **Inherited `compat` flags may not suit your gateway** — see
   [Request features (`compat`)](compat.md#request-features-compat).

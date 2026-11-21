@@ -126,8 +126,16 @@ or `INFERENCE_GATEWAY_EXTRA_MODELS=gemini-4-neon=google-generative-ai`.
   transport. The model then fails with `Custom fetch is not supported by the Google Generative AI
   adapter` before anything is sent.
 - **Requests go to** `POST {base}/v1/models/<model>:streamGenerateContent?alt=sse`. The id is the
-  gateway's own id, verbatim.
-- **Auth is Bearer by default**, like the OpenAI paths. Change it with the `google-generative-ai`
+  gateway's own id, verbatim, and must be a single path segment on gateways that route
+  `/v1/models/{model}`. The `/v1` prefix is fixed; it matches Praxis, the only gateway this was
+  checked against. A gateway that serves Gemini only under `/v1beta` is not supported.
+- **Unset `GOOGLE_GENAI_USE_VERTEXAI` and `GOOGLE_GENAI_USE_ENTERPRISE`.** When either is set, the
+  Gemini SDK inside pi switches to Vertex mode and requests
+  `{base}/v1/publishers/google/models/<model>:...` instead, which a gateway answers with a 404. The
+  credential still goes only to the gateway.
+- **Auth is Bearer by default**, like the OpenAI paths. On Praxis the native route accepts Bearer
+  and answers `401 missing API key` to `x-goog-api-key` alone; a gateway that passes Google's API
+  through unchanged may want `x-goog-api-key` instead. Change it with the `google-generative-ai`
   target of `authHeader` (for example
   `INFERENCE_GATEWAY_AUTH_HEADER=google-generative-ai=x-goog-api-key`). `x-goog-api-key` counts as
   an auth header: it is stripped from every request and refused in `headers`.

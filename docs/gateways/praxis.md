@@ -101,8 +101,8 @@ in the per-API mode (`node scripts/mock-gateway.mjs 47811`, `INFERENCE_GATEWAY_A
   "models": { "gemini-4-neon": { "api": "google-generative-ai" } }
   ```
 
-  It authenticates with Bearer, which Praxis accepts on that route (`x-goog-api-key` alone got a
-  401 on one deployment); with the Basic setup, add `"authHeader": "basic"` as for the other paths.
+  It authenticates with Bearer, which Praxis accepts on that route (`x-goog-api-key` alone gets
+  `401 missing API key`); with the Basic setup, add `"authHeader": "basic"` as for the other paths.
   The deployment must allow the native route for your key. Otherwise it answers
   `403 model_not_allowed` there even when the same model works on chat completions. See
   [Native Gemini route](../routing.md#native-gemini-route).

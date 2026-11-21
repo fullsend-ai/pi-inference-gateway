@@ -45,7 +45,7 @@ logs. Back to the [README](../README.md).
   whose `baseUrlEnv` resolves to another URL than `INFERENCE_GATEWAY_BASE_URL` is refused
   `INFERENCE_GATEWAY_*` credentials exactly like a literal `baseUrl`.
 - **No secrets in the file.** Keys and passwords are referenced by variable name or file path; a
-  literal `apiKey` or `password`, or an `authorization`/`x-api-key` entry in `headers`, is refused.
+  literal `apiKey` or `password`, or an `authorization`/`x-api-key`/`x-goog-api-key` entry in `headers`, is refused.
   No `!command` keys, no shell-out.
 - **Redirects are never followed**, on model requests or on discovery: a redirect is an error, so a
   key cannot be forwarded to another origin.
