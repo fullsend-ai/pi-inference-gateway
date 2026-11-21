@@ -1,9 +1,10 @@
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createProvider, normalizeContext } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/compat";
 import type { Context, FetchFunction, Model, ModelsPublication, Provider, RefreshModelsContext } from "@earendil-works/pi-ai";
-import type { GatewayApi, GatewayConfig } from "./config.ts";
+import type { DiscoverableApi, GatewayApi, GatewayConfig } from "./config.ts";
 import { parseModelEntry, buildModel, extraModels, type GatewayModel } from "./discovery.ts";
 import {
   createGatewayFetch,
@@ -15,7 +16,7 @@ import {
   registerGateways,
   type ProviderRegistry,
 } from "./provider.ts";
-import { sseFor } from "./test-fixtures.ts";
+import { geminiSse, sseFor } from "./test-fixtures.ts";
 
 function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
@@ -34,14 +35,14 @@ function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   };
 }
 
-function model(id: string, api: GatewayApi, cfg: GatewayConfig = config()): GatewayModel {
+function model(id: string, api: DiscoverableApi, cfg: GatewayConfig = config()): GatewayModel {
   const entry = parseModelEntry({ id, api });
   assert.ok(entry);
   return buildModel(entry, cfg);
 }
 
 /** One model per transport, with ids no pi catalog knows, plus a vendor-prefixed one. */
-const MODELS: Array<[string, GatewayApi]> = [
+const MODELS: Array<[string, DiscoverableApi]> = [
   ["test-claude", "anthropic-messages"],
   ["test-gpt", "openai-responses"],
   ["acme/test-chat", "openai-completions"],
@@ -410,12 +411,12 @@ describe("createProvider integration", () => {
   });
 });
 
-const PATHS: Record<GatewayApi, string> = {
+const PATHS: Record<DiscoverableApi, string> = {
   "anthropic-messages": "/v1/messages",
   "openai-responses": "/v1/responses",
   "openai-completions": "/v1/chat/completions",
 };
-const NATIVE: Record<GatewayApi, "x-api-key" | "authorization"> = {
+const NATIVE: Record<DiscoverableApi, "x-api-key" | "authorization"> = {
   "anthropic-messages": "x-api-key",
   "openai-responses": "authorization",
   "openai-completions": "authorization",
@@ -515,6 +516,149 @@ describe("one open-weight model routed through every API, with reasoning", () =>
       assert.equal(calls[0].url.pathname, PATHS[api]);
       assert.equal(calls[0].body.model, GLM);
       assertOneAuthHeader(calls[0].headers, NATIVE[api]);
+    });
+  }
+});
+
+/**
+ * pi-ai before 1.6.0 refuses any `options.fetch` on its Gemini transport ("Custom fetch is not
+ * supported by the Google Generative AI adapter"); 1.6.0 hands it to the SDK. Read from the
+ * installed package, so each CI matrix entry asserts what its own pi does.
+ */
+const PI_AI_VERSION: string = JSON.parse(
+  readFileSync(new URL("../node_modules/@earendil-works/pi-ai/package.json", import.meta.url), "utf8"),
+).version;
+const GEMINI_TAKES_FETCH = (() => {
+  const [major = 0, minor = 0] = PI_AI_VERSION.split(".").map(Number);
+  return major > 1 || (major === 1 && minor >= 6);
+})();
+
+describe(`native Gemini transport (google-generative-ai) on pi-ai ${PI_AI_VERSION}`, () => {
+  // `@google/genai` switches to Vertex mode when either variable is set, and Vertex mode rewrites
+  // the path to `/v1/publishers/google/models/<id>`. pi does not pass `vertexai: false`, so pin
+  // them off here; the developer's shell must not decide what these tests assert.
+  const VERTEX_ENV = ["GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_ENTERPRISE"] as const;
+  const savedVertexEnv = new Map<string, string | undefined>();
+  before(() => {
+    for (const name of VERTEX_ENV) {
+      savedVertexEnv.set(name, process.env[name]);
+      delete process.env[name];
+    }
+  });
+  after(() => {
+    for (const [name, value] of savedVertexEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  const GEMINI = "acme/test-gemini";
+  const geminiProvider = (cfg: GatewayConfig, env: Record<string, string> = { GW_KEY: "tok" }) =>
+    createProvider(gatewayProviderOptions(cfg, extraModels(cfg, new Set()), { env }));
+  const geminiConfig = (overrides: Partial<GatewayConfig> = {}) =>
+    config({ models: { [GEMINI]: { api: "google-generative-ai" } }, ...overrides });
+  const PATH = `/v1/models/${GEMINI}:streamGenerateContent`;
+
+  it("is registered on /v1 only through models[id].api", () => {
+    const found = providerModel(geminiProvider(geminiConfig()), GEMINI);
+    assert.equal(found.api, "google-generative-ai");
+    assert.equal(found.baseUrl, "https://gw.example.com/v1");
+  });
+
+  if (GEMINI_TAKES_FETCH) {
+    it(`POSTs ${PATH} with Bearer only, never x-goog-api-key`, async () => {
+      const { calls, fetch } = recorder();
+      const provider = geminiProvider(geminiConfig({ headers: { "x-team": "docs" } }));
+      const message = await provider.streamSimple(providerModel(provider, GEMINI), CONTEXT, { apiKey: "tok", fetch }).result();
+      assert.equal(message.stopReason, "stop", `stream failed: ${message.errorMessage ?? "no reason given"}`);
+      const [block] = message.content;
+      assert.ok(block?.type === "text" && block.text === "ok", JSON.stringify(block));
+      assert.equal(message.usage.output, 2);
+      assert.equal(calls.length, 1);
+      const [call] = calls;
+      assert.equal(call.method, "POST");
+      assert.equal(call.url.origin, "https://gw.example.com");
+      assert.equal(decodeURIComponent(call.url.pathname), PATH);
+      assert.equal(call.url.searchParams.get("key"), null, "no key in the URL");
+      assert.equal(call.url.searchParams.get("alt"), "sse");
+      assertOneAuthHeader(call.headers, "authorization");
+      assert.equal(call.headers.has("x-goog-api-key"), false, "pi's x-goog-api-key is stripped");
+      assert.equal(call.headers.get("x-team"), "docs");
+    });
+
+    for (const [scheme, expected] of [
+      ["x-api-key", (headers: Headers) => assertOneAuthHeader(headers, "x-api-key")],
+      ["x-goog-api-key", (headers: Headers) => {
+        assert.equal(headers.get("x-goog-api-key"), "tok");
+        assert.equal(headers.has("authorization") || headers.has("x-api-key"), false, "exactly one auth header");
+      }],
+    ] as const) {
+      it(`an authHeader override of ${scheme} for google-generative-ai is honoured`, async () => {
+        const { calls, fetch } = recorder();
+        const provider = geminiProvider(geminiConfig({ authHeaders: { "google-generative-ai": scheme } }));
+        const message = await provider.streamSimple(providerModel(provider, GEMINI), CONTEXT, { apiKey: "tok", fetch }).result();
+        assert.equal(message.stopReason, "stop", `stream failed: ${message.errorMessage ?? "no reason given"}`);
+        expected(calls[0].headers);
+      });
+    }
+
+    it("authHeader basic sends exactly one Basic header", async () => {
+      const cfg = geminiConfig({ apiKeyEnv: undefined, usernameEnv: "GW_USER", passwordEnv: "GW_PASS", authHeaders: { "google-generative-ai": "basic" } });
+      const { calls, fetch } = recorder();
+      const provider = geminiProvider(cfg, { GW_USER: "gateway", GW_PASS: "test-pass" }); // gitleaks:allow (test fixture)
+      const message = await provider.streamSimple(providerModel(provider, GEMINI), CONTEXT, { apiKey: "basic-auth", fetch }).result();
+      assert.equal(message.stopReason, "stop", message.errorMessage ?? "");
+      assert.equal(calls[0].headers.get("authorization"), "Basic Z2F0ZXdheTp0ZXN0LXBhc3M=");
+      assert.equal(calls[0].headers.has("x-goog-api-key"), false);
+    });
+
+    it("replays the tool call's thoughtSignature on the next turn (what chat completions drops)", async () => {
+      const SIGNATURE = "c2lnLWdlbWluaS10ZXN0";
+      type GeminiPart = { functionCall?: { name: string }; thoughtSignature?: string };
+      type GeminiRequest = { contents: Array<{ role: string; parts: GeminiPart[] }> };
+      const requests: GeminiRequest[] = [];
+      const headers: Headers[] = [];
+      const fetch: FetchFunction = async (input, init) => {
+        const request = new Request(input, init);
+        headers.push(request.headers);
+        requests.push(JSON.parse(await request.text()));
+        const sse =
+          requests.length === 1
+            ? geminiSse(GEMINI, "reading", undefined, { name: "read", args: { path: "a.txt" }, thoughtSignature: SIGNATURE })
+            : geminiSse(GEMINI, "done");
+        return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+      };
+      const provider = geminiProvider(geminiConfig());
+      const gemini = providerModel(provider, GEMINI);
+      const tools = [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } }];
+      const user = { role: "user" as const, content: "read a.txt", timestamp: 0 };
+      const first = await provider.streamSimple(gemini, normalizeContext({ messages: [user], tools }), { apiKey: "tok", fetch }).result();
+      assert.equal(first.stopReason, "toolUse", first.errorMessage ?? "");
+      const call = first.content.find((block) => block.type === "toolCall");
+      assert.ok(call?.type === "toolCall");
+      const result = { role: "toolResult" as const, toolCallId: call.id, toolName: "read", content: [{ type: "text" as const, text: "hello" }], isError: false, timestamp: 0 };
+      const second = await provider
+        .streamSimple(gemini, normalizeContext({ messages: [user, first, result], tools }), { apiKey: "tok", fetch })
+        .result();
+      assert.equal(second.stopReason, "stop", second.errorMessage ?? "");
+      assert.equal(requests.length, 2);
+      // Gemini checks the signature on the replayed functionCall part, so pin it there.
+      const replayedCall = requests[1].contents
+        .filter((content) => content.role === "model")
+        .flatMap((content) => content.parts)
+        .find((part) => part.functionCall?.name === "read");
+      assert.equal(replayedCall?.thoughtSignature, SIGNATURE, `turn 2 must carry the signature: ${JSON.stringify(requests[1])}`);
+      assertOneAuthHeader(headers[1], "authorization");
+      assert.equal(headers[1].has("x-goog-api-key"), false);
+    });
+  } else {
+    it("fails closed before sending anything: this pi refuses the gateway's fetch on its Gemini transport", async () => {
+      const { calls, fetch } = recorder();
+      const provider = geminiProvider(geminiConfig());
+      const message = await provider.streamSimple(providerModel(provider, GEMINI), CONTEXT, { apiKey: "tok", fetch }).result();
+      assert.equal(message.stopReason, "error");
+      assert.match(message.errorMessage ?? "", /Custom fetch is not supported/);
+      assert.equal(calls.length, 0, "no request leaves without the wrapper");
     });
   }
 });

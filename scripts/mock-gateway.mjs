@@ -14,8 +14,11 @@
 //   POST /v1/messages          Claude models
 //   POST /v1/responses         GPT / o-series models, none of them listed
 //   POST /v1/chat/completions  Gemini models
-// plus one open-weight model, `oss/zai-org/glm-5-3`, that is unlisted, served on all three paths
-// under the same id, and returns reasoning on each. Any other model/path pair is a 404.
+//   POST /v1/models/<model>:streamGenerateContent  Gemini models on the native Gemini route (the
+//                              model is in the path), Bearer like the OpenAI paths
+// plus one open-weight model, `oss/zai-org/glm-5-3`, that is unlisted, served on the three
+// OpenAI/Anthropic paths under the same id, and returns reasoning on each. Any other model/path
+// pair is a 404.
 //   live:  x-api-key ONLY on /v1/messages and the Anthropic-format list (Bearer is a 401), Bearer
 //          everywhere else; the token is $MOCK_GATEWAY_TOKEN (default `test-token`)
 //   basic: `Authorization: Basic base64(gateway:<password>)` on every path, /v1/models included; the
@@ -27,6 +30,7 @@
 //                                          (one list, whatever the `anthropic-version` header)
 //   Bearer only, on every path: x-api-key or no token → 401 text/plain
 //                                          `authentication failure: no bearer token found`
+//   no native Gemini route (404)
 //   routing by the body `model`; the path only picks the input format:
 //     Claude on /v1/responses              → 400 text/plain `... unsupported conversion: from
 //                                            Responses to provider anthropic (supported: [AnthropicMessages])`
@@ -45,7 +49,7 @@
 // (auth shows header names and the authorization scheme only, never a value).
 
 import { createServer } from "node:http";
-import { sseFor } from "../src/test-fixtures.ts";
+import { geminiModelFromPath, sseFor } from "../src/test-fixtures.ts";
 
 const TOKEN = process.env.MOCK_GATEWAY_TOKEN || "test-token";
 const TTL_RAW = process.env.MOCK_GATEWAY_TOKEN_TTL_MS;
@@ -96,6 +100,9 @@ const ROUTES = {
   "/v1/chat/completions": { auth: "bearer", serves: (model) => model.startsWith("gemini-") },
 };
 
+/** The native Gemini route, `POST /v1/models/<model>:streamGenerateContent` (live and basic only). */
+const GEMINI_ROUTE = { auth: "bearer", serves: (model) => model.startsWith("gemini-") };
+
 function authorized(headers, kind) {
   if (MODE === "basic") return headers.authorization === BASIC;
   const bearer = /^Bearer (.*)$/.exec(String(headers.authorization ?? ""))?.[1];
@@ -119,7 +126,7 @@ function describeAuth(kind) {
 
 /** The auth header names a request carried, plus the scheme of `authorization` (never its value). */
 function authSummary(headers) {
-  const names = ["authorization", "x-api-key"].filter((name) => headers[name] !== undefined);
+  const names = ["authorization", "x-api-key", "x-goog-api-key"].filter((name) => headers[name] !== undefined);
   if (names.length === 0) return "none";
   return names.map((name) => (name === "authorization" ? `authorization(${authScheme(headers.authorization)})` : name)).join(",");
 }
@@ -190,6 +197,8 @@ const server = createServer(async (request, response) => {
       model = "";
     }
   }
+  const geminiModel = request.method === "POST" ? geminiModelFromPath(pathname) : undefined;
+  if (geminiModel !== undefined) model = geminiModel;
   const version = request.headers["anthropic-version"] !== undefined ? " anthropic-version" : "";
   console.log(`${request.method} ${pathname} auth=${authSummary(request.headers)}${version}${model ? ` model=${model}` : ""}`);
 
@@ -203,12 +212,12 @@ const server = createServer(async (request, response) => {
     return send(response, 200, anthropic ? ANTHROPIC_LISTED : LISTED);
   }
 
-  const route = request.method === "POST" ? ROUTES[pathname] : undefined;
+  const route = request.method === "POST" ? (geminiModel !== undefined ? GEMINI_ROUTE : ROUTES[pathname]) : undefined;
   if (!route) return send(response, 404, { error: { message: `no route for ${request.method} ${pathname}` } });
   if (!authorized(request.headers, route.auth)) {
     return send(response, 401, { error: { message: `${pathname} requires ${describeAuth(route.auth)}` } });
   }
-  if (model !== OPEN_WEIGHT && !route.serves(model)) {
+  if ((geminiModel !== undefined || model !== OPEN_WEIGHT) && !route.serves(model)) {
     return send(response, 404, { error: { message: `${model} is not served on ${pathname}` } });
   }
   return stream(response, pathname, model);

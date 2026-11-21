@@ -1,8 +1,9 @@
-// Canned SSE bodies for the three transports, shared by the unit tests and
+// Canned SSE bodies for the four transports, shared by the unit tests and
 // scripts/mock-gateway.mjs so the end-to-end check serves exactly the bytes the tests parse.
 // Not imported by the extension itself. `reasoning`, when given, is emitted the way each protocol
 // carries raw reasoning: a signed `thinking` block (Messages), a `reasoning` output item with raw
-// `reasoning_text` events (Responses), `delta.reasoning_content` chunks (Chat Completions).
+// `reasoning_text` events (Responses), `delta.reasoning_content` chunks (Chat Completions), a
+// `thought: true` part (Gemini).
 
 function frames(events: Array<[string | undefined, unknown]>): string {
   return events
@@ -119,10 +120,60 @@ export function openAICompletionsSse(model: string, text: string, reasoning?: st
   ]);
 }
 
-/** The SSE body for a request path, or undefined for anything else. */
+/** A Gemini function call, as `geminiSse` emits it: `thoughtSignature` sits on the functionCall part. */
+export interface GeminiFunctionCall {
+  name: string;
+  args: Record<string, unknown>;
+  thoughtSignature: string;
+}
+
+/**
+ * Gemini stream (`POST /v1/models/{model}:streamGenerateContent?alt=sse`). Reasoning is a
+ * `thought: true` part; `functionCall`, when given, follows the text and ends the turn.
+ */
+export function geminiSse(model: string, text: string, reasoning?: string, functionCall?: GeminiFunctionCall): string {
+  const chunk = (parts: unknown[], extra: Record<string, unknown> = {}) => ({
+    candidates: [{ content: { role: "model", parts }, index: 0, ...extra }],
+    modelVersion: model,
+    responseId: "gemini_test",
+  });
+  const thought: Array<[undefined, unknown]> = reasoning === undefined ? [] : [[undefined, chunk([{ text: reasoning, thought: true }])]];
+  const call = functionCall
+    ? [{ functionCall: { name: functionCall.name, args: functionCall.args }, thoughtSignature: functionCall.thoughtSignature }]
+    : [];
+  return frames([
+    ...thought,
+    [undefined, chunk([{ text }])],
+    [
+      undefined,
+      {
+        ...chunk(call, { finishReason: "STOP" }),
+        usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 2, totalTokenCount: 9 },
+      },
+    ],
+  ]);
+}
+
+/** The model id in a Gemini `.../models/{model}:streamGenerateContent` path, or undefined. */
+export function geminiModelFromPath(pathname: string): string | undefined {
+  const match = /\/v1\/models\/(.+):streamGenerateContent$/.exec(pathname);
+  if (!match) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined; // malformed percent-encoding: not a Gemini path, so the mock answers 404
+  }
+}
+
+/**
+ * The SSE body for a request path, or undefined for anything else. On the Gemini path the model
+ * comes from the path (the body carries none), so `model` is not used there.
+ */
 export function sseFor(pathname: string, model: string, text: string, reasoning?: string): string | undefined {
   if (pathname.endsWith("/v1/messages")) return anthropicMessagesSse(model, text, reasoning);
   if (pathname.endsWith("/v1/responses")) return openAIResponsesSse(model, text, reasoning);
   if (pathname.endsWith("/v1/chat/completions")) return openAICompletionsSse(model, text, reasoning);
+  const gemini = geminiModelFromPath(pathname);
+  if (gemini !== undefined) return geminiSse(gemini, text, reasoning);
   return undefined;
 }
