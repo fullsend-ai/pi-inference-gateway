@@ -177,3 +177,46 @@ export function sseFor(pathname: string, model: string, text: string, reasoning?
   if (gemini !== undefined) return geminiSse(gemini, text, reasoning);
   return undefined;
 }
+
+/** A Chat Completions tool call, as `openAICompletionsToolCallSse` emits it. */
+export interface CompletionsToolCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  /** Sent on the tool call as `extra_content`, the way Praxis carries Gemini's thought_signature. */
+  extraContent?: Record<string, unknown>;
+}
+
+/**
+ * Chat Completions stream that ends in one tool call, the shape a Gemini backend returns: the whole
+ * call (id, name, arguments and any `extra_content`) on one chunk, then `finish_reason: "tool_calls"`.
+ */
+export function openAICompletionsToolCallSse(model: string, call: CompletionsToolCall): string {
+  const chunk = (choices: unknown[], extra: Record<string, unknown> = {}) => ({
+    id: "chatcmpl_test",
+    object: "chat.completion.chunk",
+    created: 0,
+    model,
+    choices,
+    ...extra,
+  });
+  const toolCall = {
+    ...(call.extraContent === undefined ? {} : { extra_content: call.extraContent }),
+    function: { arguments: JSON.stringify(call.args), name: call.name },
+    id: call.id,
+    index: 0,
+    type: "function",
+  };
+  return frames([
+    [undefined, chunk([{ index: 0, delta: { role: "assistant", tool_calls: [toolCall] }, finish_reason: null }])],
+    [undefined, chunk([{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: "tool_calls" }], { usage: { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9 } })],
+    [undefined, "[DONE]"],
+  ]);
+}
+
+/**
+ * A Praxis (Gemini on `/v1/chat/completions`) tool-call stream captured live on 2026-11-25, with
+ * the thought_signature and response id replaced. The whole call, `extra_content` included, is on
+ * the first chunk.
+ */
+export const PRAXIS_GEMINI_TOOL_CALL_SSE = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"extra_content\":{\"google\":{\"thought_signature\":\"c2lnbmF0dXJlLXJlZGFjdGVk\"}},\"function\":{\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\",\"name\":\"read\"},\"id\":\"call_12186773193409843544\",\"index\":0,\"type\":\"function\"}]},\"index\":0,\"logprobs\":null}],\"created\":1795623129,\"id\":\"chatcmpl_redacted\",\"model\":\"google/gemini-4-neon\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\"}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":\"tool_calls\",\"index\":0,\"logprobs\":null}],\"created\":1795623129,\"id\":\"chatcmpl_redacted\",\"model\":\"google/gemini-4-neon\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":{\"completion_tokens\":19,\"completion_tokens_details\":{\"reasoning_tokens\":38},\"extra_properties\":{\"google\":{\"traffic_type\":\"ON_DEMAND\"}},\"prompt_tokens\":97,\"total_tokens\":154}}\n\ndata: [DONE]\n\n";

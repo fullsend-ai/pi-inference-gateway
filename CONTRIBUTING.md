@@ -145,7 +145,7 @@ and stay. PLAN.md, "Generality audit", lists every vendor-, id- or backend-speci
 ## The CI matrix replaces a compat file
 
 `ci.yml` runs the suite against each supported pi version (`1.3.0`, the peer floor; `1.5.0`,
-fullsend's sandbox pin; and `1.6.0`, the latest release) by installing it over the lockfile's:
+the previous release; and `1.6.0`, the latest release and fullsend's sandbox pin) by installing it over the lockfile's:
 
 ```bash
 npm install --no-save --ignore-scripts @earendil-works/pi-ai@$V @earendil-works/pi-coding-agent@$V
@@ -153,8 +153,8 @@ npm run ci
 ```
 
 Because nothing here mirrors pi internals, a pi release can break it only through the public
-surface the tests call. Bump the newest entry when pi releases, the middle one when fullsend moves its
-pin, and the oldest when the peer floor moves.
+surface the tests call. Bump the newest entry when pi releases, keep fullsend's pin in the list, and
+bump the oldest when the peer floor moves.
 
 ## Gotchas
 

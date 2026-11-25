@@ -30,6 +30,11 @@ export const LIMITS = {
   maxTokenCount: 100_000_000,
   /** Upper bound for a per-million-token price read from the wire, in USD. */
   maxCostPerMillion: 100_000,
+  /**
+   * Largest `extra_content` (as JSON, in bytes) carried in a tool-call id; a larger one is not
+   * carried. A Gemini thought_signature is a few hundred bytes (about 370 seen live).
+   */
+  maxToolCallExtraBytes: 64 * 1024,
 } as const;
 
 export const DEFAULTS = {

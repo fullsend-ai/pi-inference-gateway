@@ -18,8 +18,8 @@ npm run ci      # lint + test — must pass before any commit
 ```
 
 `npm ci` installs the lockfile's pi (1.6.0). CI runs against each pi version in its matrix
-(1.3.0, the peer floor; 1.5.0, which is what fullsend's sandbox runs; and 1.6.0, the latest
-release); check each explicitly before pushing:
+(1.3.0, the peer floor; 1.5.0, the previous release; and 1.6.0, the latest release and
+fullsend's sandbox pin); check each explicitly before pushing:
 
 ```bash
 npm install --no-save --ignore-scripts @earendil-works/pi-ai@1.3.0 @earendil-works/pi-coding-agent@1.3.0

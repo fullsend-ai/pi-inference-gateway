@@ -306,14 +306,17 @@ tool calls, thinking, URL binding, a wrong key, an unreachable base URL). Findin
 - E5: README notes on gateway limits, override-only entries not being fallbacks, `</dev/null` for
   `pi -p`, and thinking appearing only on reasoning prompts.
 - E6: the Gemini `thought_signature` limitation is confirmed live (turn 2 → 400). README updated.
+  Fixed in v0.3.0 by the generic `extra_content` carry (`src/tool-call-extra.ts`, see "Generality
+  audit"); confirmed live on 2026-11-25 that the signature arrives on the tool call's id chunk.
 
 ## Deferred follow-ups
 
 Not implemented; in priority order:
 
 1. **Upstream: pi-ai openai-completions should replay provider-specific assistant fields** (Gemini
-   `extra_content.google.thought_signature`). The fix belongs in pi. Here only a generic hook that
-   replays unknown provider fields for any model would be acceptable, never a Gemini branch.
+   `extra_content.google.thought_signature`; earendil-works/pi#10157). The fix belongs in pi. Until
+   then the generic `extra_content` carry (v0.3.0) does it here; drop it once pi replays the field
+   itself (the restore already defers to any value pi sends).
 2. **Upstream: pi-ai catalog compat `supportsMidConvoEffort`** assumes the first-party Anthropic
    transport; ask for a documented way, or per-endpoint compat.
 3. **Per-API base path** (`apiBasePaths` keyed by API in `baseUrlFor`), for gateways that mount
@@ -347,7 +350,7 @@ keyed on a vendor, model id, owner or backend:
 | text/plain error bodies in discovery errors (D5) | `plainTextDetail` | error display | kept | General: any gateway; credentials redacted. |
 | Native auth header per transport | `NATIVE_AUTH_HEADERS` | protocol | kept | Describes each protocol; every target is overridable. |
 | Basic username default `gateway` | `DEFAULT_BASIC_USERNAME` | default | kept | A default value only (Praxis's documented one); overridable. |
-| Gemini `thought_signature` replay (E6) | — | dependency bug | `docs/troubleshooting.md` limitation + upstream issue; config workaround `models[id].api: "google-generative-ai"` (#48) | The chat-completions fix belongs in pi; only a generic "replay unknown provider fields for any model" hook would be acceptable here. The workaround is routing by config to pi's own native transport, with no Gemini branch in code. |
+| Tool-call `extra_content` carry (E6, Gemini `thought_signature`) | `withToolCallExtra` (`tool-call-extra.ts`), composed over `createGatewayFetch` for `openai-completions` only | dependency bug | converted: generic hook + `docs/troubleshooting.md` + upstream issue (earendil-works/pi#10157); alternative `models[id].api: "google-generative-ai"` (#48) | Keyed on the wire field, not a vendor or model: any streamed tool call with an `extra_content` object gets it carried in its id (`<id>.xc.<base64url({m, p, x})>`) and restored on the next request, for the same request `model` and provider id only (a cross-model or cross-gateway replay drops it, as pi drops `thoughtSignature`). The object is never read. No `extra_content` means byte-identical passthrough, so agentgateway's `__thought__` ids are untouched. |
 | `google-generative-ai` never chosen by discovery: wire `api` hints and `defaultApi` limited to `DISCOVERABLE_APIS`; a snapshot's saved native API not kept | `parseModelEntry`, `parseProviderEntry`/`envProvider`, `entryFromModel` | routing | kept (#48) | Keyed on the API, not a vendor: not every gateway serves a native Gemini route, nor every key on one that does (a `403 model_not_allowed` was seen live), so only the user's per-model config may select it. |
 | vLLM `thinking.budget_tokens` (E3), Vertex structured-output org policy (E2) | — | dependency bug | `docs/troubleshooting.md` only | `compat.forceAdaptiveThinking` / `compat.supportsStrictTools` per model. |
 

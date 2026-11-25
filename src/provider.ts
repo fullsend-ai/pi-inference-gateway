@@ -33,6 +33,7 @@ import {
   type LoadConfigDeps,
 } from "./config.ts";
 import { discoverModels, discoveryTargets, fallbackModels, rebindModels, ROUTING_HINTS_KEY, type GatewayModel, type RoutingHints } from "./discovery.ts";
+import { withToolCallExtra } from "./tool-call-extra.ts";
 
 export const LOG_PREFIX = "[pi-inference-gateway]";
 
@@ -187,10 +188,19 @@ export function withGatewayFetch(
   scheme: string,
   credentials: CredentialSource,
   strip: Iterable<string> = SDK_CREDENTIAL_HEADERS,
-  { sessionAffinity = false }: { sessionAffinity?: boolean } = {},
+  {
+    sessionAffinity = false,
+    toolCallExtraFor,
+  }: {
+    sessionAffinity?: boolean;
+    /** Carry tool-call `extra_content` (see tool-call-extra.ts), scoped to this pi provider id. */
+    toolCallExtraFor?: string;
+  } = {},
 ): ProviderStreams {
-  const fetchFor = (fetch: FetchFunction | undefined) =>
-    createGatewayFetch({ scheme, credentials, strip, ...(fetch ? { baseFetch: fetch } : {}) });
+  const fetchFor = (fetch: FetchFunction | undefined) => {
+    const gateway = createGatewayFetch({ scheme, credentials, strip, ...(fetch ? { baseFetch: fetch } : {}) });
+    return toolCallExtraFor === undefined ? gateway : withToolCallExtra(gateway, toolCallExtraFor);
+  };
   const wrapped: ProviderStreams = {
     ...base,
     stream: (model, context, options) =>
@@ -221,6 +231,9 @@ export function credentialSource(config: GatewayConfig, deps: RuntimeDeps = {}):
  * (`x-api-key` for Messages, Bearer for the OpenAI ones and the gateway's Gemini route) unless the
  * config overrides it.
  *
+ * `openai-completions` also carries each tool call's `extra_content` (Gemini's `thought_signature`
+ * on gateways that send it there) from one turn to the next; see `src/tool-call-extra.ts`.
+ *
  * `google-generative-ai` is pi's native Gemini transport, which stores and replays Gemini's
  * `thoughtSignature` on tool calls (pi's Chat Completions transport drops it). Only a per-model
  * `api` in the config routes a model to it. pi before 1.6.0 refuses any `options.fetch` on it
@@ -230,7 +243,10 @@ export function gatewayStreams(config: GatewayConfig, deps: RuntimeDeps = {}): R
   const credentials = credentialSource(config, deps);
   const strip = [...credentialHeaderNames(config.authHeaders)];
   const transport = (api: GatewayApi, base: ProviderStreams) =>
-    withGatewayFetch(base, authHeaderFor(config, api), credentials, strip, { sessionAffinity: config.sessionAffinity === true });
+    withGatewayFetch(base, authHeaderFor(config, api), credentials, strip, {
+      sessionAffinity: config.sessionAffinity === true,
+      ...(api === "openai-completions" ? { toolCallExtraFor: config.id } : {}),
+    });
   return {
     "anthropic-messages": transport("anthropic-messages", anthropicMessagesApi()),
     "openai-responses": transport("openai-responses", openAIResponsesApi()),

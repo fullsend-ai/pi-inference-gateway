@@ -15,13 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 1.3.0 is the peerDependencies floor; 1.5.0 is fullsend's sandbox image pin
-        # (images/sandbox/Containerfile ARG PI_VERSION); 1.6.0 is the latest pi release and the
-        # lockfile's. This matrix is the compatibility check: the extension mirrors no pi
+        # 1.3.0 is the peerDependencies floor; 1.5.0 is the previous pi release; 1.6.0 is the latest
+        # pi release, the lockfile's, and fullsend's sandbox image pin (images/sandbox/Containerfile
+        # ARG PI_VERSION). This matrix is the compatibility check: the extension mirrors no pi
         # internals, so a pi release can only break it through the public `createProvider` /
         # lazy transport / `getBuiltinModels` surface — which is exactly what the tests exercise.
-        # Bump the newest entry when pi releases, the middle one when fullsend moves its pin,
-        # and the oldest when the peer floor moves.
+        # Bump the newest entry when pi releases, keep fullsend's pin in the list, and bump the
+        # oldest when the peer floor moves.
         pi: ["1.3.0", "1.5.0", "1.6.0"]
     name: ci (pi ${{ matrix.pi }})
     steps:
