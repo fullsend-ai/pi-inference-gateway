@@ -16,6 +16,13 @@
 //   POST /v1/chat/completions  Gemini models
 //   POST /v1/models/<model>:streamGenerateContent  Gemini models on the native Gemini route (the
 //                              model is in the path), Bearer like the OpenAI paths
+// A Gemini model on /v1/chat/completions, asked with a `read` tool and a last user message
+// "read <path>", answers with one `read` tool call, and checks the replayed call on the next turn:
+//   live, basic:   the signature rides on the call as `extra_content.google.thought_signature`
+//                  (Praxis); a replayed call without it is a 400 "Function call is missing a
+//                  thought_signature", as Gemini answers
+//   agentgateway:  the signature is packed into the id as `<id>__thought__<sig>` and no
+//                  `extra_content` is sent; a replayed id without `__thought__` is the same 400
 // plus one open-weight model, `oss/zai-org/glm-5-3`, that is unlisted, served on the three
 // OpenAI/Anthropic paths under the same id, and returns reasoning on each. Any other model/path
 // pair is a 404.
@@ -49,7 +56,7 @@
 // (auth shows header names and the authorization scheme only, never a value).
 
 import { createServer } from "node:http";
-import { geminiModelFromPath, sseFor } from "../src/test-fixtures.ts";
+import { geminiModelFromPath, openAICompletionsToolCallSse, sseFor } from "../src/test-fixtures.ts";
 
 const TOKEN = process.env.MOCK_GATEWAY_TOKEN || "test-token";
 const TTL_RAW = process.env.MOCK_GATEWAY_TOKEN_TTL_MS;
@@ -158,14 +165,41 @@ function sendText(response, status, text) {
   response.end(text);
 }
 
-function stream(response, pathname, model) {
+const SIGNATURE = "bW9jay10aG91Z2h0LXNpZ25hdHVyZQ";
+
+/** A Gemini tool-call turn on chat completions (see the header), or false when it does not apply. */
+function geminiToolTurn(response, pathname, model, body) {
+  if (pathname !== "/v1/chat/completions" || !model.startsWith("gemini-")) return false;
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const hasRead = Array.isArray(body?.tools) && body.tools.some((tool) => tool?.function?.name === "read");
+  const replayed = messages.flatMap((message) => (Array.isArray(message?.tool_calls) ? message.tool_calls : []));
+  const signed = (call) =>
+    MODE === "agentgateway" ? String(call?.id ?? "").includes("__thought__") : call?.extra_content?.google?.thought_signature === SIGNATURE;
+  if (replayed.some((call) => !signed(call))) {
+    send(response, 400, { error: { code: 400, message: "Function call is missing a thought_signature in functionCall parts.", status: "INVALID_ARGUMENT" } });
+    return true;
+  }
+  const last = messages.at(-1);
+  const path = last?.role === "user" ? /\bread (\S+)/.exec(typeof last.content === "string" ? last.content : JSON.stringify(last.content))?.[1] : undefined;
+  if (!hasRead || path === undefined) return false;
+  const call =
+    MODE === "agentgateway"
+      ? { id: `call_mock__thought__${SIGNATURE}`, name: "read", args: { path } }
+      : { id: "call_mock", name: "read", args: { path }, extraContent: { google: { thought_signature: SIGNATURE } } };
+  response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  response.end(openAICompletionsToolCallSse(model, call));
+  return true;
+}
+
+function stream(response, pathname, model, body) {
+  if (geminiToolTurn(response, pathname, model, body)) return;
   const reasoning = model === OPEN_WEIGHT ? `thinking about ${pathname}` : undefined;
   response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
   response.end(sseFor(pathname, model, `hi from ${pathname} as ${model}`, reasoning));
 }
 
 /** agentgateway: one listener, the body's model picks the backend, the path only the input format. */
-function agentgateway(request, response, pathname, model) {
+function agentgateway(request, response, pathname, model, body) {
   if (!authorized(request.headers)) return sendText(response, 401, "authentication failure: no bearer token found");
   if (request.method === "GET" && (pathname === "/v1/models" || pathname.startsWith("/v1/models/"))) {
     return send(response, 200, AGW_LISTED);
@@ -184,15 +218,17 @@ function agentgateway(request, response, pathname, model) {
       "failed to process LLM request: unsupported conversion: from Responses to provider anthropic (supported: [AnthropicMessages])",
     );
   }
-  return stream(response, pathname, model);
+  return stream(response, pathname, model, body);
 }
 
 const server = createServer(async (request, response) => {
   const { pathname } = new URL(request.url ?? "/", "http://localhost");
   let model = "";
+  let body;
   if (request.method === "POST") {
     try {
-      model = String(JSON.parse(await readBody(request)).model ?? "");
+      body = JSON.parse(await readBody(request));
+      model = String(body?.model ?? "");
     } catch {
       model = "";
     }
@@ -202,7 +238,7 @@ const server = createServer(async (request, response) => {
   const version = request.headers["anthropic-version"] !== undefined ? " anthropic-version" : "";
   console.log(`${request.method} ${pathname} auth=${authSummary(request.headers)}${version}${model ? ` model=${model}` : ""}`);
 
-  if (MODE === "agentgateway") return agentgateway(request, response, pathname, model);
+  if (MODE === "agentgateway") return agentgateway(request, response, pathname, model, body);
 
   if (request.method === "GET" && pathname === "/v1/models") {
     // The Anthropic-format list takes the same auth as /v1/messages.
@@ -220,7 +256,7 @@ const server = createServer(async (request, response) => {
   if ((geminiModel !== undefined || model !== OPEN_WEIGHT) && !route.serves(model)) {
     return send(response, 404, { error: { message: `${model} is not served on ${pathname}` } });
   }
-  return stream(response, pathname, model);
+  return stream(response, pathname, model, body);
 });
 
 server.listen(port, "127.0.0.1", () => {

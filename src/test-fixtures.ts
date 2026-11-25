@@ -177,3 +177,39 @@ export function sseFor(pathname: string, model: string, text: string, reasoning?
   if (gemini !== undefined) return geminiSse(gemini, text, reasoning);
   return undefined;
 }
+
+/** A Chat Completions tool call, as `openAICompletionsToolCallSse` emits it. */
+export interface CompletionsToolCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  /** Sent on the tool call as `extra_content`, the way Praxis carries Gemini's thought_signature. */
+  extraContent?: Record<string, unknown>;
+}
+
+/**
+ * Chat Completions stream that ends in one tool call, the shape a Gemini backend returns: the whole
+ * call (id, name, arguments and any `extra_content`) on one chunk, then `finish_reason: "tool_calls"`.
+ */
+export function openAICompletionsToolCallSse(model: string, call: CompletionsToolCall): string {
+  const chunk = (choices: unknown[], extra: Record<string, unknown> = {}) => ({
+    id: "chatcmpl_test",
+    object: "chat.completion.chunk",
+    created: 0,
+    model,
+    choices,
+    ...extra,
+  });
+  const toolCall = {
+    ...(call.extraContent === undefined ? {} : { extra_content: call.extraContent }),
+    function: { arguments: JSON.stringify(call.args), name: call.name },
+    id: call.id,
+    index: 0,
+    type: "function",
+  };
+  return frames([
+    [undefined, chunk([{ index: 0, delta: { role: "assistant", tool_calls: [toolCall] }, finish_reason: null }])],
+    [undefined, chunk([{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: "tool_calls" }], { usage: { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9 } })],
+    [undefined, "[DONE]"],
+  ]);
+}

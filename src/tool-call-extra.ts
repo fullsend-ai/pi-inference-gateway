@@ -11,48 +11,61 @@ import type { FetchFunction } from "@earendil-works/pi-ai";
  *
  * So, on Chat Completions only:
  * - **response**: a streamed tool call that carries `extra_content` gets its id rewritten to
- *   `<id>.xc.<base64url(JSON of extra_content)>`;
- * - **request**: every id with that suffix is restored to `<id>`, and the decoded object is put
- *   back as that tool call's `extra_content`. Tool results get the plain id.
+ *   `<id>.xc.<base64url(JSON)>`, where the JSON holds the `extra_content` and the request's `model`;
+ * - **request**: every id with that suffix is restored to `<id>`. When the request is for the same
+ *   model, the carried object is put back as that tool call's `extra_content`; for another model it
+ *   is dropped, the way pi drops a `thoughtSignature` on a cross-model replay. Tool results get the
+ *   plain id either way.
  *
  * Nothing in here knows what is inside `extra_content`. A stream with no `extra_content` is passed
  * through byte for byte, and a request with no suffixed id is sent unchanged, so gateways that
  * carry the data some other way (agentgateway's `<id>__thought__<sig>`) are not touched.
  *
  * Only the chunk that carries the id is rewritten: pi takes a tool call's id from the first chunk
- * that has one. `extra_content` that arrives on a later chunk than the id is not carried.
+ * that has one. `extra_content` that arrives on a later chunk than the id is not carried. Gemini
+ * streams each function call whole, id and `extra_content` on one chunk.
  */
 
 /** `.` is outside the base64url alphabet, so the last `.xc.` always starts the suffix. */
 export const EXTRA_MARKER = ".xc.";
 
+/** What the suffix carries: the `extra_content` (`x`) and the model it came from (`m`), if known. */
+export interface CarriedExtra {
+  extra: Record<string, unknown>;
+  model?: string;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function encodeToolCallId(id: string, extra: Record<string, unknown>): string {
-  return `${id}${EXTRA_MARKER}${Buffer.from(JSON.stringify(extra), "utf8").toString("base64url")}`;
+export function encodeToolCallId(id: string, { extra, model }: CarriedExtra): string {
+  const payload = model === undefined ? { x: extra } : { m: model, x: extra };
+  return `${id}${EXTRA_MARKER}${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
 }
 
-/** The original id and the carried object, or undefined when the id has no valid suffix. */
-export function decodeToolCallId(id: string): { id: string; extra: Record<string, unknown> } | undefined {
+/** The original id and what it carries, or undefined when the id has no valid suffix. */
+export function decodeToolCallId(id: string): ({ id: string } & CarriedExtra) | undefined {
   const at = id.lastIndexOf(EXTRA_MARKER);
-  if (at < 0) return undefined;
-  const payload = id.slice(at + EXTRA_MARKER.length);
-  if (!/^[A-Za-z0-9_-]+$/.test(payload)) return undefined;
+  if (at <= 0) return undefined;
+  const encoded = id.slice(at + EXTRA_MARKER.length);
+  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) return undefined;
+  let payload: unknown;
   try {
-    const extra: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return isPlainObject(extra) ? { id: id.slice(0, at), extra } : undefined;
+    payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
   } catch {
     return undefined;
   }
+  if (!isPlainObject(payload) || !isPlainObject(payload.x)) return undefined;
+  if (payload.m !== undefined && typeof payload.m !== "string") return undefined;
+  return { id: id.slice(0, at), extra: payload.x, ...(payload.m === undefined ? {} : { model: payload.m }) };
 }
 
 // --- request ------------------------------------------------------------------------------------
 
 /**
- * A Chat Completions request body with every suffixed id restored and its `extra_content` put back,
- * or undefined when nothing changed (the caller then sends the original body).
+ * A Chat Completions request body with every suffixed id restored and its `extra_content` put back
+ * (same model only), or undefined when nothing changed (the caller then sends the original body).
  */
 export function restoreRequestBody(body: string): string | undefined {
   if (!body.includes(EXTRA_MARKER)) return undefined;
@@ -63,6 +76,7 @@ export function restoreRequestBody(body: string): string | undefined {
     return undefined;
   }
   if (!isPlainObject(parsed) || !Array.isArray(parsed.messages)) return undefined;
+  const requestModel = typeof parsed.model === "string" ? parsed.model : undefined;
   let changed = false;
   for (const message of parsed.messages) {
     if (!isPlainObject(message)) continue;
@@ -72,9 +86,10 @@ export function restoreRequestBody(body: string): string | undefined {
         const decoded = decodeToolCallId(call.id);
         if (!decoded) continue;
         call.id = decoded.id;
+        changed = true;
+        if (decoded.model !== undefined && decoded.model !== requestModel) continue;
         // A value pi (or a future pi) already sends wins over the carried one, key by key.
         call.extra_content = isPlainObject(call.extra_content) ? { ...decoded.extra, ...call.extra_content } : decoded.extra;
-        changed = true;
       }
     }
     if (typeof message.tool_call_id === "string") {
@@ -90,8 +105,11 @@ export function restoreRequestBody(body: string): string | undefined {
 
 // --- response -----------------------------------------------------------------------------------
 
-/** One SSE `data:` payload with tool-call ids rewritten, or undefined when it needs no change. */
-export function rewriteChunk(data: string): string | undefined {
+/**
+ * One SSE `data:` payload with tool-call ids rewritten, or undefined when it needs no change.
+ * `model` is the request's model, recorded so the next request can tell a cross-model replay.
+ */
+export function rewriteChunk(data: string, model?: string): string | undefined {
   if (!data.includes("extra_content")) return undefined;
   let chunk: unknown;
   try {
@@ -107,7 +125,7 @@ export function rewriteChunk(data: string): string | undefined {
     for (const call of calls) {
       if (!isPlainObject(call) || typeof call.id !== "string" || call.id === "" || !isPlainObject(call.extra_content)) continue;
       if (decodeToolCallId(call.id)) continue; // already carried (a replayed or re-sent id)
-      call.id = encodeToolCallId(call.id, call.extra_content);
+      call.id = encodeToolCallId(call.id, { extra: call.extra_content, ...(model === undefined ? {} : { model }) });
       changed = true;
     }
   }
@@ -119,7 +137,7 @@ export function rewriteChunk(data: string): string | undefined {
  * (an optional trailing `\r` is kept); every other line and every unchanged `data:` line is passed
  * through exactly as received.
  */
-export function rewriteSseStream(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+export function rewriteSseStream(body: ReadableStream<Uint8Array>, model?: string): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let pending = "";
@@ -127,8 +145,7 @@ export function rewriteSseStream(body: ReadableStream<Uint8Array>): ReadableStre
     const cr = line.endsWith("\r") ? "\r" : "";
     const content = cr ? line.slice(0, -1) : line;
     if (!content.startsWith("data:")) return line;
-    const data = content.slice(5).trimStart();
-    const rewritten = rewriteChunk(data);
+    const rewritten = rewriteChunk(content.slice(5).trimStart(), model);
     return rewritten === undefined ? line : `data: ${rewritten}${cr}`;
   };
   return body.pipeThrough(
@@ -160,21 +177,32 @@ function requestPath(input: Parameters<FetchFunction>[0]): string {
   }
 }
 
+function bodyModel(body: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return isPlainObject(parsed) && typeof parsed.model === "string" ? parsed.model : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Wraps a fetch so Chat Completions requests and streamed responses carry `extra_content` (see the
  * module comment). Any other path, a non-string body, and a non-SSE response are left alone.
  */
 export function withToolCallExtra(inner: FetchFunction): FetchFunction {
   return async (input, init) => {
-    if (!requestPath(input).endsWith("/chat/completions")) return inner(input, init);
-    const restored = typeof init?.body === "string" ? restoreRequestBody(init.body) : undefined;
+    if (!requestPath(input).endsWith("/chat/completions") || typeof init?.body !== "string") return inner(input, init);
+    const restored = restoreRequestBody(init.body);
     const response = await inner(input, restored === undefined ? init : { ...init, body: restored });
     const type = response.headers.get("content-type") ?? "";
     if (!response.body || !type.includes("text/event-stream")) return response;
-    return new Response(rewriteSseStream(response.body), {
+    const headers = new Headers(response.headers);
+    headers.delete("content-length"); // a rewritten id changes the length
+    return new Response(rewriteSseStream(response.body, bodyModel(init.body)), {
       status: response.status,
       statusText: response.statusText,
-      headers: response.headers,
+      headers,
     });
   };
 }
