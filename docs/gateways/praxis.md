@@ -94,7 +94,8 @@ in the per-API mode (`node scripts/mock-gateway.mjs 47811`, `INFERENCE_GATEWAY_A
 - Gemini tool calls on `/v1/chat/completions` need v0.3.0 or later. Praxis returns Gemini's
   `thought_signature` as `extra_content` on each tool call, which pi drops; the extension carries
   it in the tool-call id instead (see [Known limitations](../troubleshooting.md#known-limitations)).
-  Before v0.3.0, turn 2 is a `400 Function call is missing a thought_signature`.
+  Before v0.3.0, turn 2 fails with `400 Function call is missing a thought_signature in
+  functionCall parts`.
   Praxis also serves Gemini's native API (`/v1/models/<model>:generateContent` and
   `:streamGenerateContent`), and pi's native Gemini transport replays the signature there. As an
   alternative on pi 1.6.0 or later, route each Gemini model to it:

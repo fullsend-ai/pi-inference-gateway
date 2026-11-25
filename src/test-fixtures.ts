@@ -213,3 +213,10 @@ export function openAICompletionsToolCallSse(model: string, call: CompletionsToo
     [undefined, "[DONE]"],
   ]);
 }
+
+/**
+ * A Praxis (Gemini on `/v1/chat/completions`) tool-call stream captured live on 2026-11-25, with
+ * the thought_signature and response id replaced. The whole call, `extra_content` included, is on
+ * the first chunk.
+ */
+export const PRAXIS_GEMINI_TOOL_CALL_SSE = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"extra_content\":{\"google\":{\"thought_signature\":\"c2lnbmF0dXJlLXJlZGFjdGVk\"}},\"function\":{\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\",\"name\":\"read\"},\"id\":\"call_12186773193409843544\",\"index\":0,\"type\":\"function\"}]},\"index\":0,\"logprobs\":null}],\"created\":1795623129,\"id\":\"chatcmpl_redacted\",\"model\":\"google/gemini-4-neon\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\"}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":\"tool_calls\",\"index\":0,\"logprobs\":null}],\"created\":1795623129,\"id\":\"chatcmpl_redacted\",\"model\":\"google/gemini-4-neon\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"\",\"usage\":{\"completion_tokens\":19,\"completion_tokens_details\":{\"reasoning_tokens\":38},\"extra_properties\":{\"google\":{\"traffic_type\":\"ON_DEMAND\"}},\"prompt_tokens\":97,\"total_tokens\":154}}\n\ndata: [DONE]\n\n";

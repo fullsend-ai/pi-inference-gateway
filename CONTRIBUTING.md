@@ -153,8 +153,8 @@ npm run ci
 ```
 
 Because nothing here mirrors pi internals, a pi release can break it only through the public
-surface the tests call. Bump the newest entry when pi releases, the middle one when fullsend moves its
-pin, and the oldest when the peer floor moves.
+surface the tests call. Bump the newest entry when pi releases, keep fullsend's pin in the list, and
+bump the oldest when the peer floor moves.
 
 ## Gotchas
 

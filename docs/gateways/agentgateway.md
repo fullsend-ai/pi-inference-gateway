@@ -149,7 +149,7 @@ $ INFERENCE_GATEWAY_API_KEY=wrong-token-value pi -ne -e . --list-models
 - The classic `routes:` mode does not serve `/v1/models` (501); use the `llm:` mode.
 - Gemini behind an agentgateway Vertex/Gemini provider is expected **not** to hit the
   [`thought_signature` limitation](../troubleshooting.md#known-limitations): agentgateway carries the signature inside
-  the tool-call id (`<id>__thought__<signature>`), which pi replays verbatim, and sends no
-  `extra_content`, so the extension's `extra_content` carrying leaves it alone. This is from
+  the tool-call id (`<id>__thought__<signature>`), which pi replays verbatim. Because agentgateway
+  sends no `extra_content`, the extension leaves those ids untouched. This is from
   agentgateway's source and the mock (`--mode agentgateway`); it has not been verified against a
   live Gemini model.

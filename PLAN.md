@@ -316,7 +316,7 @@ Not implemented; in priority order:
 1. **Upstream: pi-ai openai-completions should replay provider-specific assistant fields** (Gemini
    `extra_content.google.thought_signature`; earendil-works/pi#10157). The fix belongs in pi. Until
    then the generic `extra_content` carry (v0.3.0) does it here; drop it once pi replays the field
-   itself (the restore already lets a value pi sends win).
+   itself (the restore already defers to any value pi sends).
 2. **Upstream: pi-ai catalog compat `supportsMidConvoEffort`** assumes the first-party Anthropic
    transport; ask for a documented way, or per-endpoint compat.
 3. **Per-API base path** (`apiBasePaths` keyed by API in `baseUrlFor`), for gateways that mount

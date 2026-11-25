@@ -5,7 +5,8 @@ import type { AssistantMessage, FetchFunction, Model, Provider } from "@earendil
 import type { DiscoverableApi, GatewayApi, GatewayConfig } from "./config.ts";
 import { buildModel, parseModelEntry } from "./discovery.ts";
 import { gatewayProviderOptions } from "./provider.ts";
-import { openAICompletionsSse, openAICompletionsToolCallSse, openAIResponsesSse } from "./test-fixtures.ts";
+import { LIMITS } from "./discovery.ts";
+import { PRAXIS_GEMINI_TOOL_CALL_SSE, openAICompletionsSse, openAICompletionsToolCallSse, openAIResponsesSse } from "./test-fixtures.ts";
 import {
   EXTRA_MARKER,
   decodeToolCallId,
@@ -119,6 +120,21 @@ describe("rewriteChunk", () => {
     assert.deepEqual(decodeToolCallId(out.choices[0].delta.tool_calls[0].id), { id: "call_1", extra: EXTRA, model: "m" });
   });
 
+  it("rewrites every tool call in a chunk that carries extra_content, and only those", () => {
+    const data = JSON.stringify({
+      choices: [{ index: 0, delta: { tool_calls: [{ id: "a", index: 0, extra_content: EXTRA }, { id: "b", index: 1 }, { id: "c", index: 2, extra_content: { k: 1 } }] } }],
+    });
+    const ids = JSON.parse(rewriteChunk(data, "m") ?? "null").choices[0].delta.tool_calls.map((call: { id: string }) => decodeToolCallId(call.id)?.id ?? call.id);
+    assert.deepEqual(ids, ["a", "b", "c"]);
+    const raw = JSON.parse(rewriteChunk(data, "m") ?? "null").choices[0].delta.tool_calls.map((call: { id: string }) => call.id);
+    assert.equal(raw[1], "b");
+  });
+
+  it(`does not carry an extra_content larger than ${LIMITS.maxToolCallExtraBytes} bytes`, () => {
+    const big = { blob: "x".repeat(LIMITS.maxToolCallExtraBytes) };
+    assert.equal(rewriteChunk(chunk({ id: "call_1", index: 0, extra_content: big })), undefined);
+  });
+
   it("leaves tool calls without extra_content, without an id, or already carried", () => {
     assert.equal(rewriteChunk(chunk({ id: "call_1", index: 0 })), undefined);
     assert.equal(rewriteChunk(chunk({ index: 0, extra_content: EXTRA })), undefined);
@@ -149,6 +165,18 @@ describe("rewriteSseStream", () => {
     assert.deepEqual(decodeToolCallId(first.choices[0].delta.tool_calls[0].id), { id: "call_1", extra: EXTRA, model: "gemini-4-neon" });
     assert.equal(first.choices[0].delta.tool_calls[0].function.arguments, JSON.stringify({ path: "ä.txt" }));
     assert.ok(rewritten.endsWith("data: [DONE]\n\n"));
+  });
+
+  it("rewrites the live Praxis capture: the id and extra_content share the first chunk", async () => {
+    const out = await text(rewriteSseStream(streamOf([PRAXIS_GEMINI_TOOL_CALL_SSE]), "gemini-4-neon"));
+    const lines = out.split("\n\n");
+    const call = JSON.parse(lines[0].slice("data: ".length)).choices[0].delta.tool_calls[0];
+    assert.deepEqual(decodeToolCallId(call.id), {
+      id: "call_12186773193409843544",
+      extra: { google: { thought_signature: "c2lnbmF0dXJlLXJlZGFjdGVk" } },
+      model: "gemini-4-neon",
+    });
+    assert.equal(lines.slice(1).join("\n\n"), PRAXIS_GEMINI_TOOL_CALL_SSE.split("\n\n").slice(1).join("\n\n"), "later chunks are untouched");
   });
 
   it("splits into one-byte chunks and still gets the same result", async () => {
@@ -300,16 +328,16 @@ async function runTwoTurns(
 
 describe("pi end to end: Chat Completions tool calls carry extra_content to the next turn", () => {
   it("Praxis shape: turn 2 carries extra_content on the replayed call, with the gateway's own ids", async () => {
-    const gw = twoTurnGateway(openAICompletionsToolCallSse(GEMINI, { id: "call_1", name: "read", args: { path: "a.txt" }, extraContent: EXTRA }), {
-      strict: true,
-    });
+    // Turn 1 is the live Praxis capture, so this pins the real chunk layout, not a fixture's.
+    const gw = twoTurnGateway(PRAXIS_GEMINI_TOOL_CALL_SSE, { strict: true });
+    const id = "call_12186773193409843544";
     const { second, callId } = await runTwoTurns(gw, GEMINI);
     assert.equal(second.stopReason, "stop", second.errorMessage ?? "");
-    assert.ok(callId.startsWith(`call_1${EXTRA_MARKER}`), "pi stores the carrying id");
+    assert.ok(callId.startsWith(`${id}${EXTRA_MARKER}`), "pi stores the carrying id");
     const assistant = gw.requests[1].messages.find((message) => message.role === "assistant");
-    assert.equal(assistant?.tool_calls?.[0].id, "call_1");
-    assert.deepEqual(assistant?.tool_calls?.[0].extra_content, EXTRA);
-    assert.equal(gw.requests[1].messages.find((message) => message.role === "tool")?.tool_call_id, "call_1");
+    assert.equal(assistant?.tool_calls?.[0].id, id);
+    assert.deepEqual(assistant?.tool_calls?.[0].extra_content, { google: { thought_signature: "c2lnbmF0dXJlLXJlZGFjdGVk" } });
+    assert.equal(gw.requests[1].messages.find((message) => message.role === "tool")?.tool_call_id, id);
     for (const { headers, redirect } of gw.seen) {
       assert.equal(redirect, "error", "the composed fetch still refuses redirects");
       assert.equal(headers.get("authorization"), "Bearer tok");

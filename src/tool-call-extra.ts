@@ -1,4 +1,5 @@
 import type { FetchFunction } from "@earendil-works/pi-ai";
+import { LIMITS } from "./discovery.ts";
 
 /**
  * Carries a tool call's `extra_content` through pi's Chat Completions transport.
@@ -7,7 +8,8 @@ import type { FetchFunction } from "@earendil-works/pi-ai";
  * it back on that call in the next request. Gemini's `thought_signature`
  * (`extra_content.google.thought_signature`) is the case that matters: without it, turn 2 is a 400.
  * pi's transport keeps neither the field nor any unknown field, but it does keep the tool-call id
- * verbatim (for every provider except `openai`, and for ids without `|`) and stores it in the session.
+ * as received, stores it in the session, and sends it back unchanged on a same-model replay (it
+ * rewrites ids only on a cross-model replay).
  *
  * So, on Chat Completions only:
  * - **response**: a streamed tool call that carries `extra_content` gets its id rewritten to
@@ -17,13 +19,18 @@ import type { FetchFunction } from "@earendil-works/pi-ai";
  *   is dropped, the way pi drops a `thoughtSignature` on a cross-model replay. Tool results get the
  *   plain id either way.
  *
- * Nothing in here knows what is inside `extra_content`. A stream with no `extra_content` is passed
- * through byte for byte, and a request with no suffixed id is sent unchanged, so gateways that
- * carry the data some other way (agentgateway's `<id>__thought__<sig>`) are not touched.
+ * Nothing in here knows what is inside `extra_content`. A UTF-8 stream with no `extra_content` is
+ * passed through byte for byte, and a request with no suffixed id is sent unchanged, so gateways
+ * that carry the data some other way (agentgateway's `<id>__thought__<sig>`) are not touched.
  *
- * Only the chunk that carries the id is rewritten: pi takes a tool call's id from the first chunk
- * that has one. `extra_content` that arrives on a later chunk than the id is not carried. Gemini
- * streams each function call whole, id and `extra_content` on one chunk.
+ * Not carried (the call passes through as received):
+ * - `extra_content` on a later chunk than the id, because pi takes a tool call's id from the first
+ *   chunk that has one. A Praxis capture (`PRAXIS_GEMINI_TOOL_CALL_SSE` in the test fixtures) has
+ *   the whole call, id and `extra_content`, on one chunk;
+ * - a `data:` payload split over several `data:` lines, which no chat-completions gateway sends;
+ * - an `extra_content` larger than `LIMITS.maxToolCallExtraBytes`;
+ * - after a cross-model replay, an id pi rewrote (another transport, or provider id `openai`, which
+ *   cuts ids to 40 characters): its suffix no longer decodes, so it is sent as it is.
  */
 
 /** `.` is outside the base64url alphabet, so the last `.xc.` always starts the suffix. */
@@ -125,6 +132,7 @@ export function rewriteChunk(data: string, model?: string): string | undefined {
     for (const call of calls) {
       if (!isPlainObject(call) || typeof call.id !== "string" || call.id === "" || !isPlainObject(call.extra_content)) continue;
       if (decodeToolCallId(call.id)) continue; // already carried (a replayed or re-sent id)
+      if (Buffer.byteLength(JSON.stringify(call.extra_content), "utf8") > LIMITS.maxToolCallExtraBytes) continue;
       call.id = encodeToolCallId(call.id, { extra: call.extra_content, ...(model === undefined ? {} : { model }) });
       changed = true;
     }

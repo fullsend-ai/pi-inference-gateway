@@ -94,22 +94,28 @@ For agentgateway-specific errors, see
 
 ## Known limitations
 
-- **Tool-call `extra_content` rides in the tool-call id** on `/v1/chat/completions`. Some gateways
+- **Gemini tool calls and `extra_content` on `/v1/chat/completions`.** Some gateways
   attach opaque data to each streamed tool call as `extra_content` and need it back on that call in
   the next request; Gemini's `thought_signature` (`extra_content.google.thought_signature`) is the
-  one that matters. pi's chat-completions transport keeps neither field, so before v0.3.0 turn 2 of
+  one that matters. pi's chat-completions transport drops this field, so before v0.3.0 turn 2 of
   a Gemini tool call was rejected with `400 Function call is missing a thought_signature in
   functionCall parts`. Since v0.3.0 the extension appends the data to the tool-call id
   (`<id>.xc.<base64url>`), which pi stores in the session, and on the next request restores the id
   and puts `extra_content` back on the call. What you may notice:
-  - Tool-call ids in the session file and `--mode json` output are longer than the gateway's. The
-    gateway only ever sees its own ids.
-  - When a session switches to another model, the carried data is dropped, as pi drops its own
-    `thoughtSignature`; the ids stay paired.
+  - Tool-call ids in the session file and `--mode json` output are longer than the gateway's.
+    Chat-completions requests send the gateway's own ids back.
+  - When a session switches to another model, the carried data is dropped for every earlier tool
+    call, as pi drops its own `thoughtSignature`. A Gemini model that continues a session with
+    another model's tool calls can therefore still get the 400: start a new session to change
+    Gemini models.
+  - After a model switch, pi may rewrite earlier ids before the extension sees them: other
+    transports (Messages, Responses, native Gemini) replace characters and shorten them, and with
+    the provider id `openai` chat completions cuts them to 40 characters. Those ids then reach the
+    gateway with part of the suffix. Tool calls and their results still pair up.
   - A session recorded before v0.3.0 still holds ids without the data; start a new session for
     Gemini tool calls.
   - It works only when `extra_content` arrives on the same streamed chunk as the tool call's id.
-    Gemini sends each call whole on one chunk.
+    Praxis sends each Gemini call whole on one chunk.
 
   Gateways that carry the signature in the tool-call id themselves, such as
   [agentgateway](gateways/agentgateway.md) (`<id>__thought__<signature>`), send no `extra_content`
