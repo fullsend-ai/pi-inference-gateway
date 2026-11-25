@@ -25,6 +25,8 @@
 //   chunk that has one. A Praxis capture (`PRAXIS_GEMINI_TOOL_CALL_SSE` in the test fixtures) has
 //   the whole call, id and `extra_content`, on one chunk;
 // - a `data:` payload split over several `data:` lines, which no chat-completions gateway sends;
+// - a stream framed with bare CR line endings (lines are split on LF; CRLF is handled), which no
+//   chat-completions gateway sends;
 // - an `extra_content` larger than `LIMITS.maxToolCallExtraBytes`;
 // - after a cross-model replay, an id pi rewrote (another transport, or provider id `openai`, which
 //   cuts ids to 40 characters): its suffix no longer decodes, so it is sent as it is.
