@@ -42,6 +42,10 @@ describe("encodeToolCallId / decodeToolCallId", () => {
     assert.deepEqual(decodeToolCallId(id), { id: "call_123", extra: EXTRA, model: "gemini-4-neon" });
   });
 
+  it("round-trips the gateway's provider id", () => {
+    assert.deepEqual(decodeToolCallId(encodeToolCallId("c", { extra: { a: 1 }, model: "m", provider: "gw" })), { id: "c", extra: { a: 1 }, model: "m", provider: "gw" });
+  });
+
   it("round-trips without a model", () => {
     assert.deepEqual(decodeToolCallId(encodeToolCallId("c", { extra: { a: 1 } })), { id: "c", extra: { a: 1 } });
   });
@@ -57,6 +61,7 @@ describe("encodeToolCallId / decodeToolCallId", () => {
     ["a suffix outside base64url", "call_1.xc.not+base64"],
     ["a suffix that is not JSON", `call_1.xc.${Buffer.from("nope").toString("base64url")}`],
     ["a payload without an object x", `call_1.xc.${Buffer.from(JSON.stringify({ x: [1] })).toString("base64url")}`],
+    ["a non-string provider", `call_1.xc.${Buffer.from(JSON.stringify({ p: 1, x: {} })).toString("base64url")}`],
     ["a non-string model", `call_1.xc.${Buffer.from(JSON.stringify({ m: 1, x: {} })).toString("base64url")}`],
     ["an empty original id", `.xc.${Buffer.from(JSON.stringify({ x: {} })).toString("base64url")}`],
   ] as const) {
@@ -65,7 +70,7 @@ describe("encodeToolCallId / decodeToolCallId", () => {
 });
 
 describe("restoreRequestBody", () => {
-  const carried = (model?: string) => encodeToolCallId("call_1", { extra: EXTRA, ...(model ? { model } : {}) });
+  const carried = (origin: { model?: string; provider?: string }) => encodeToolCallId("call_1", { extra: EXTRA, ...origin });
   const body = (model: string, id: string, callExtra?: Record<string, unknown>) =>
     JSON.stringify({
       model,
@@ -79,36 +84,40 @@ describe("restoreRequestBody", () => {
         { role: "tool", tool_call_id: id, content: "hello" },
       ],
     });
+  const restore = (text: string, provider = "gateway") => JSON.parse(restoreRequestBody(text, provider) ?? "null");
+  const NEON = { model: "gemini-4-neon", provider: "gateway" };
 
-  it("same model: restores both ids and puts extra_content back on the tool call", () => {
-    const restored = JSON.parse(restoreRequestBody(body("gemini-4-neon", carried("gemini-4-neon"))) ?? "null");
+  it("same model, same gateway: restores both ids and puts extra_content back on the tool call", () => {
+    const restored = restore(body("gemini-4-neon", carried(NEON)));
     assert.equal(restored.messages[1].tool_calls[0].id, "call_1");
     assert.deepEqual(restored.messages[1].tool_calls[0].extra_content, EXTRA);
     assert.equal(restored.messages[2].tool_call_id, "call_1");
   });
 
-  it("another model: restores the ids and drops the carried extra_content", () => {
-    const restored = JSON.parse(restoreRequestBody(body("glm-5-3", carried("gemini-4-neon"))) ?? "null");
-    assert.equal(restored.messages[1].tool_calls[0].id, "call_1");
-    assert.equal("extra_content" in restored.messages[1].tool_calls[0], false);
-    assert.equal(restored.messages[2].tool_call_id, "call_1");
-  });
-
-  it("no recorded model: puts extra_content back for any model", () => {
-    const restored = JSON.parse(restoreRequestBody(body("anything", carried())) ?? "null");
-    assert.deepEqual(restored.messages[1].tool_calls[0].extra_content, EXTRA);
-  });
+  for (const [name, text, provider] of [
+    ["another model", body("glm-5-3", carried(NEON)), "gateway"],
+    ["the same model id on another gateway", body("gemini-4-neon", carried(NEON)), "other-gateway"],
+    ["no recorded model", body("gemini-4-neon", carried({ provider: "gateway" })), "gateway"],
+    ["no recorded gateway", body("gemini-4-neon", carried({ model: "gemini-4-neon" })), "gateway"],
+  ] as const) {
+    it(`${name}: restores the ids and drops the carried extra_content`, () => {
+      const restored = restore(text, provider);
+      assert.equal(restored.messages[1].tool_calls[0].id, "call_1");
+      assert.equal("extra_content" in restored.messages[1].tool_calls[0], false);
+      assert.equal(restored.messages[2].tool_call_id, "call_1");
+    });
+  }
 
   it("an extra_content already on the call wins, key by key", () => {
-    const restored = JSON.parse(restoreRequestBody(body("m", carried("m"), { google: { other: 1 }, own: true })) ?? "null");
+    const restored = restore(body("m", carried({ model: "m", provider: "gateway" }), { google: { other: 1 }, own: true }));
     assert.deepEqual(restored.messages[1].tool_calls[0].extra_content, { google: { other: 1 }, own: true });
   });
 
   it("returns undefined when nothing needs restoring", () => {
-    assert.equal(restoreRequestBody(body("m", "call_1")), undefined);
-    assert.equal(restoreRequestBody(body("m", "call_1__thought__c2ln")), undefined);
-    assert.equal(restoreRequestBody("not json .xc. at all"), undefined);
-    assert.equal(restoreRequestBody(JSON.stringify({ input: ".xc." })), undefined);
+    assert.equal(restoreRequestBody(body("m", "call_1"), "gateway"), undefined);
+    assert.equal(restoreRequestBody(body("m", "call_1__thought__c2ln"), "gateway"), undefined);
+    assert.equal(restoreRequestBody("not json .xc. at all", "gateway"), undefined);
+    assert.equal(restoreRequestBody(JSON.stringify({ input: ".xc." }), "gateway"), undefined);
   });
 });
 
@@ -116,17 +125,17 @@ describe("rewriteChunk", () => {
   const chunk = (call: Record<string, unknown>) => JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [call] } }] });
 
   it("suffixes the id of a tool call that carries extra_content, recording the model", () => {
-    const out = JSON.parse(rewriteChunk(chunk({ id: "call_1", index: 0, extra_content: EXTRA }), "m") ?? "null");
-    assert.deepEqual(decodeToolCallId(out.choices[0].delta.tool_calls[0].id), { id: "call_1", extra: EXTRA, model: "m" });
+    const out = JSON.parse(rewriteChunk(chunk({ id: "call_1", index: 0, extra_content: EXTRA }), { model: "m", provider: "gateway" }) ?? "null");
+    assert.deepEqual(decodeToolCallId(out.choices[0].delta.tool_calls[0].id), { id: "call_1", extra: EXTRA, model: "m", provider: "gateway" });
   });
 
   it("rewrites every tool call in a chunk that carries extra_content, and only those", () => {
     const data = JSON.stringify({
       choices: [{ index: 0, delta: { tool_calls: [{ id: "a", index: 0, extra_content: EXTRA }, { id: "b", index: 1 }, { id: "c", index: 2, extra_content: { k: 1 } }] } }],
     });
-    const ids = JSON.parse(rewriteChunk(data, "m") ?? "null").choices[0].delta.tool_calls.map((call: { id: string }) => decodeToolCallId(call.id)?.id ?? call.id);
+    const ids = JSON.parse(rewriteChunk(data, { model: "m", provider: "gateway" }) ?? "null").choices[0].delta.tool_calls.map((call: { id: string }) => decodeToolCallId(call.id)?.id ?? call.id);
     assert.deepEqual(ids, ["a", "b", "c"]);
-    const raw = JSON.parse(rewriteChunk(data, "m") ?? "null").choices[0].delta.tool_calls.map((call: { id: string }) => call.id);
+    const raw = JSON.parse(rewriteChunk(data, { model: "m", provider: "gateway" }) ?? "null").choices[0].delta.tool_calls.map((call: { id: string }) => call.id);
     assert.equal(raw[1], "b");
   });
 
@@ -160,21 +169,22 @@ describe("rewriteSseStream", () => {
         controller.close();
       },
     });
-    const rewritten = await text(rewriteSseStream(parts, "gemini-4-neon"));
+    const rewritten = await text(rewriteSseStream(parts, { model: "gemini-4-neon", provider: "gateway" }));
     const first = JSON.parse(rewritten.split("\n")[0].slice("data: ".length));
-    assert.deepEqual(decodeToolCallId(first.choices[0].delta.tool_calls[0].id), { id: "call_1", extra: EXTRA, model: "gemini-4-neon" });
+    assert.deepEqual(decodeToolCallId(first.choices[0].delta.tool_calls[0].id), { id: "call_1", extra: EXTRA, model: "gemini-4-neon", provider: "gateway" });
     assert.equal(first.choices[0].delta.tool_calls[0].function.arguments, JSON.stringify({ path: "ä.txt" }));
     assert.ok(rewritten.endsWith("data: [DONE]\n\n"));
   });
 
   it("rewrites the live Praxis capture: the id and extra_content share the first chunk", async () => {
-    const out = await text(rewriteSseStream(streamOf([PRAXIS_GEMINI_TOOL_CALL_SSE]), "gemini-4-neon"));
+    const out = await text(rewriteSseStream(streamOf([PRAXIS_GEMINI_TOOL_CALL_SSE]), { model: "gemini-4-neon", provider: "gateway" }));
     const lines = out.split("\n\n");
     const call = JSON.parse(lines[0].slice("data: ".length)).choices[0].delta.tool_calls[0];
     assert.deepEqual(decodeToolCallId(call.id), {
       id: "call_12186773193409843544",
       extra: { google: { thought_signature: "c2lnbmF0dXJlLXJlZGFjdGVk" } },
       model: "gemini-4-neon",
+      provider: "gateway",
     });
     assert.equal(lines.slice(1).join("\n\n"), PRAXIS_GEMINI_TOOL_CALL_SSE.split("\n\n").slice(1).join("\n\n"), "later chunks are untouched");
   });
@@ -187,14 +197,14 @@ describe("rewriteSseStream", () => {
         controller.close();
       },
     });
-    const whole = await text(rewriteSseStream(streamOf([sse]), "m"));
-    assert.equal(await text(rewriteSseStream(oneByte, "m")), whole);
+    const whole = await text(rewriteSseStream(streamOf([sse]), { model: "m", provider: "gateway" }));
+    assert.equal(await text(rewriteSseStream(oneByte, { model: "m", provider: "gateway" })), whole);
     assert.notEqual(whole, sse);
   });
 
   it("keeps CRLF line endings", async () => {
     const crlf = sse.replaceAll("\n", "\r\n");
-    const out = await text(rewriteSseStream(streamOf([crlf]), "m"));
+    const out = await text(rewriteSseStream(streamOf([crlf]), { model: "m", provider: "gateway" }));
     assert.equal(out.split("\r\n").length, crlf.split("\r\n").length);
     assert.ok(out.includes(EXTRA_MARKER));
   });
@@ -206,7 +216,7 @@ describe("rewriteSseStream", () => {
       ": keep-alive comment\r\nevent: x\ndata:{\"tight\":true}\n\ndata: unterminated",
     ];
     for (const input of plain) {
-      assert.equal(await text(rewriteSseStream(streamOf([input.slice(0, 7), input.slice(7)]), "m")), input);
+      assert.equal(await text(rewriteSseStream(streamOf([input.slice(0, 7), input.slice(7)]), { model: "m", provider: "gateway" })), input);
     }
   });
 });
@@ -218,21 +228,21 @@ describe("withToolCallExtra", () => {
   it("leaves other paths and non-string bodies alone", async () => {
     const original = sseResponse(openAICompletionsToolCallSse("m", { id: "c", name: "read", args: {}, extraContent: EXTRA }));
     const inner: FetchFunction = async () => original;
-    const fetch = withToolCallExtra(inner);
+    const fetch = withToolCallExtra(inner, "gateway");
     assert.equal(await fetch("https://gw.example.com/v1/responses", { method: "POST", body: "{}" }), original);
     assert.equal(await fetch("https://gw.example.com/v1/chat/completions", { method: "POST" }), original);
   });
 
   it("drops content-length from a rewritten stream and passes a JSON response through", async () => {
     const sse = openAICompletionsToolCallSse("m", { id: "c", name: "read", args: {}, extraContent: EXTRA });
-    const fetch = withToolCallExtra(async () => sseResponse(sse, { "content-length": String(sse.length), "x-request-id": "r1" }));
+    const fetch = withToolCallExtra(async () => sseResponse(sse, { "content-length": String(sse.length), "x-request-id": "r1" }), "gateway");
     const response = await fetch("https://gw.example.com/v1/chat/completions", { method: "POST", body: JSON.stringify({ model: "m" }) });
     assert.equal(response.headers.has("content-length"), false);
     assert.equal(response.headers.get("x-request-id"), "r1");
     assert.ok((await response.text()).includes(EXTRA_MARKER));
 
     const json = new Response("{}", { headers: { "content-type": "application/json" } });
-    assert.equal(await withToolCallExtra(async () => json)("https://gw.example.com/v1/chat/completions", { body: "{}" }), json);
+    assert.equal(await withToolCallExtra(async () => json, "gateway")("https://gw.example.com/v1/chat/completions", { body: "{}" }), json);
   });
 });
 

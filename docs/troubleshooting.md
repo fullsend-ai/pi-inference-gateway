@@ -104,8 +104,8 @@ For agentgateway-specific errors, see
   and puts `extra_content` back on the call. What you may notice:
   - Tool-call ids in the session file and `--mode json` output are longer than the gateway's.
     Chat-completions requests send the gateway's own ids back.
-  - When a session switches to another model, the carried data is dropped for every earlier tool
-    call, as pi drops its own `thoughtSignature`. A Gemini model that continues a session with
+  - When a session switches to another model, or to the same model on another gateway provider, the
+    carried data is dropped for every earlier tool call, as pi drops its own `thoughtSignature`. A Gemini model that continues a session with
     another model's tool calls can therefore still get the 400: start a new session to change
     Gemini models.
   - After a model switch, pi may rewrite earlier ids before the extension sees them: other

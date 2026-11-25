@@ -1,53 +1,62 @@
+// Carries a tool call's `extra_content` through pi's Chat Completions transport.
+//
+// Some gateways attach opaque per-call data to each streamed tool call as `extra_content` and need
+// it back on that call in the next request. Gemini's `thought_signature`
+// (`extra_content.google.thought_signature`) is the case that matters: without it, turn 2 is a 400.
+// pi's transport keeps neither the field nor any unknown field, but it does keep the tool-call id
+// as received, stores it in the session, and sends it back unchanged on a same-model replay (it
+// rewrites ids only on a cross-model replay).
+//
+// So, on Chat Completions only:
+// - **response**: a streamed tool call that carries `extra_content` gets its id rewritten to
+//   `<id>.xc.<base64url(JSON)>`, where the JSON holds the `extra_content`, the request's `model` and
+//   the pi provider id of this gateway;
+// - **request**: every id with that suffix is restored to `<id>`. When the request is for the same
+//   model on the same gateway, the carried object is put back as that tool call's `extra_content`;
+//   otherwise it is dropped, the way pi drops a `thoughtSignature` on a cross-model replay, so one
+//   gateway's data never reaches another. Tool results get the plain id either way.
+//
+// Nothing in here knows what is inside `extra_content`. A UTF-8 stream with no `extra_content` is
+// passed through byte for byte, and a request with no suffixed id is sent unchanged, so gateways
+// that carry the data some other way (agentgateway's `<id>__thought__<sig>`) are not touched.
+//
+// Not carried (the call passes through as received):
+// - `extra_content` on a later chunk than the id, because pi takes a tool call's id from the first
+//   chunk that has one. A Praxis capture (`PRAXIS_GEMINI_TOOL_CALL_SSE` in the test fixtures) has
+//   the whole call, id and `extra_content`, on one chunk;
+// - a `data:` payload split over several `data:` lines, which no chat-completions gateway sends;
+// - an `extra_content` larger than `LIMITS.maxToolCallExtraBytes`;
+// - after a cross-model replay, an id pi rewrote (another transport, or provider id `openai`, which
+//   cuts ids to 40 characters): its suffix no longer decodes, so it is sent as it is.
+
 import type { FetchFunction } from "@earendil-works/pi-ai";
 import { LIMITS } from "./discovery.ts";
-
-/**
- * Carries a tool call's `extra_content` through pi's Chat Completions transport.
- *
- * Some gateways attach opaque per-call data to each streamed tool call as `extra_content` and need
- * it back on that call in the next request. Gemini's `thought_signature`
- * (`extra_content.google.thought_signature`) is the case that matters: without it, turn 2 is a 400.
- * pi's transport keeps neither the field nor any unknown field, but it does keep the tool-call id
- * as received, stores it in the session, and sends it back unchanged on a same-model replay (it
- * rewrites ids only on a cross-model replay).
- *
- * So, on Chat Completions only:
- * - **response**: a streamed tool call that carries `extra_content` gets its id rewritten to
- *   `<id>.xc.<base64url(JSON)>`, where the JSON holds the `extra_content` and the request's `model`;
- * - **request**: every id with that suffix is restored to `<id>`. When the request is for the same
- *   model, the carried object is put back as that tool call's `extra_content`; for another model it
- *   is dropped, the way pi drops a `thoughtSignature` on a cross-model replay. Tool results get the
- *   plain id either way.
- *
- * Nothing in here knows what is inside `extra_content`. A UTF-8 stream with no `extra_content` is
- * passed through byte for byte, and a request with no suffixed id is sent unchanged, so gateways
- * that carry the data some other way (agentgateway's `<id>__thought__<sig>`) are not touched.
- *
- * Not carried (the call passes through as received):
- * - `extra_content` on a later chunk than the id, because pi takes a tool call's id from the first
- *   chunk that has one. A Praxis capture (`PRAXIS_GEMINI_TOOL_CALL_SSE` in the test fixtures) has
- *   the whole call, id and `extra_content`, on one chunk;
- * - a `data:` payload split over several `data:` lines, which no chat-completions gateway sends;
- * - an `extra_content` larger than `LIMITS.maxToolCallExtraBytes`;
- * - after a cross-model replay, an id pi rewrote (another transport, or provider id `openai`, which
- *   cuts ids to 40 characters): its suffix no longer decodes, so it is sent as it is.
- */
 
 /** `.` is outside the base64url alphabet, so the last `.xc.` always starts the suffix. */
 export const EXTRA_MARKER = ".xc.";
 
-/** What the suffix carries: the `extra_content` (`x`) and the model it came from (`m`), if known. */
+/**
+ * What the suffix carries: the `extra_content` (`x`), and the model (`m`) and pi provider id (`p`)
+ * of the request that returned it.
+ */
 export interface CarriedExtra {
   extra: Record<string, unknown>;
   model?: string;
+  provider?: string;
+}
+
+/** Where a request goes: its body `model` and the pi provider id of the gateway. */
+export interface ExtraOrigin {
+  model?: string;
+  provider?: string;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function encodeToolCallId(id: string, { extra, model }: CarriedExtra): string {
-  const payload = model === undefined ? { x: extra } : { m: model, x: extra };
+export function encodeToolCallId(id: string, { extra, model, provider }: CarriedExtra): string {
+  const payload = { ...(model === undefined ? {} : { m: model }), ...(provider === undefined ? {} : { p: provider }), x: extra };
   return `${id}${EXTRA_MARKER}${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
 }
 
@@ -65,16 +74,23 @@ export function decodeToolCallId(id: string): ({ id: string } & CarriedExtra) | 
   }
   if (!isPlainObject(payload) || !isPlainObject(payload.x)) return undefined;
   if (payload.m !== undefined && typeof payload.m !== "string") return undefined;
-  return { id: id.slice(0, at), extra: payload.x, ...(payload.m === undefined ? {} : { model: payload.m }) };
+  if (payload.p !== undefined && typeof payload.p !== "string") return undefined;
+  return {
+    id: id.slice(0, at),
+    extra: payload.x,
+    ...(payload.m === undefined ? {} : { model: payload.m }),
+    ...(payload.p === undefined ? {} : { provider: payload.p }),
+  };
 }
 
 // --- request ------------------------------------------------------------------------------------
 
 /**
  * A Chat Completions request body with every suffixed id restored and its `extra_content` put back
- * (same model only), or undefined when nothing changed (the caller then sends the original body).
+ * (same model and gateway only: both must be recorded and match), or undefined when nothing changed
+ * (the caller then sends the original body).
  */
-export function restoreRequestBody(body: string): string | undefined {
+export function restoreRequestBody(body: string, provider?: string): string | undefined {
   if (!body.includes(EXTRA_MARKER)) return undefined;
   let parsed: unknown;
   try {
@@ -94,7 +110,7 @@ export function restoreRequestBody(body: string): string | undefined {
         if (!decoded) continue;
         call.id = decoded.id;
         changed = true;
-        if (decoded.model !== undefined && decoded.model !== requestModel) continue;
+        if (decoded.model === undefined || decoded.model !== requestModel || decoded.provider !== provider) continue;
         // A value pi (or a future pi) already sends wins over the carried one, key by key.
         call.extra_content = isPlainObject(call.extra_content) ? { ...decoded.extra, ...call.extra_content } : decoded.extra;
       }
@@ -114,9 +130,9 @@ export function restoreRequestBody(body: string): string | undefined {
 
 /**
  * One SSE `data:` payload with tool-call ids rewritten, or undefined when it needs no change.
- * `model` is the request's model, recorded so the next request can tell a cross-model replay.
+ * `origin` is recorded so the next request can tell a cross-model or cross-gateway replay.
  */
-export function rewriteChunk(data: string, model?: string): string | undefined {
+export function rewriteChunk(data: string, origin: ExtraOrigin = {}): string | undefined {
   if (!data.includes("extra_content")) return undefined;
   let chunk: unknown;
   try {
@@ -132,12 +148,23 @@ export function rewriteChunk(data: string, model?: string): string | undefined {
     for (const call of calls) {
       if (!isPlainObject(call) || typeof call.id !== "string" || call.id === "" || !isPlainObject(call.extra_content)) continue;
       if (decodeToolCallId(call.id)) continue; // already carried (a replayed or re-sent id)
-      if (Buffer.byteLength(JSON.stringify(call.extra_content), "utf8") > LIMITS.maxToolCallExtraBytes) continue;
-      call.id = encodeToolCallId(call.id, { extra: call.extra_content, ...(model === undefined ? {} : { model }) });
+      let size: number;
+      try {
+        size = Buffer.byteLength(JSON.stringify(call.extra_content), "utf8");
+      } catch {
+        continue; // not serialisable: pass the call through as received
+      }
+      if (size > LIMITS.maxToolCallExtraBytes) continue;
+      call.id = encodeToolCallId(call.id, { extra: call.extra_content, ...origin });
       changed = true;
     }
   }
-  return changed ? JSON.stringify(chunk) : undefined;
+  if (!changed) return undefined;
+  try {
+    return JSON.stringify(chunk);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -145,7 +172,7 @@ export function rewriteChunk(data: string, model?: string): string | undefined {
  * (an optional trailing `\r` is kept); every other line and every unchanged `data:` line is passed
  * through exactly as received.
  */
-export function rewriteSseStream(body: ReadableStream<Uint8Array>, model?: string): ReadableStream<Uint8Array> {
+export function rewriteSseStream(body: ReadableStream<Uint8Array>, origin: ExtraOrigin = {}): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let pending = "";
@@ -153,7 +180,7 @@ export function rewriteSseStream(body: ReadableStream<Uint8Array>, model?: strin
     const cr = line.endsWith("\r") ? "\r" : "";
     const content = cr ? line.slice(0, -1) : line;
     if (!content.startsWith("data:")) return line;
-    const rewritten = rewriteChunk(content.slice(5).trimStart(), model);
+    const rewritten = rewriteChunk(content.slice(5).trimStart(), origin);
     return rewritten === undefined ? line : `data: ${rewritten}${cr}`;
   };
   return body.pipeThrough(
@@ -196,18 +223,19 @@ function bodyModel(body: string): string | undefined {
 
 /**
  * Wraps a fetch so Chat Completions requests and streamed responses carry `extra_content` (see the
- * module comment). Any other path, a non-string body, and a non-SSE response are left alone.
+ * module comment). `provider` is this gateway's pi provider id. Any other path, a non-string body,
+ * and a non-SSE response are left alone.
  */
-export function withToolCallExtra(inner: FetchFunction): FetchFunction {
+export function withToolCallExtra(inner: FetchFunction, provider: string): FetchFunction {
   return async (input, init) => {
     if (!requestPath(input).endsWith("/chat/completions") || typeof init?.body !== "string") return inner(input, init);
-    const restored = restoreRequestBody(init.body);
+    const restored = restoreRequestBody(init.body, provider);
     const response = await inner(input, restored === undefined ? init : { ...init, body: restored });
     const type = response.headers.get("content-type") ?? "";
     if (!response.body || !type.includes("text/event-stream")) return response;
     const headers = new Headers(response.headers);
     headers.delete("content-length"); // a rewritten id changes the length
-    return new Response(rewriteSseStream(response.body, bodyModel(init.body)), {
+    return new Response(rewriteSseStream(response.body, { model: bodyModel(init.body), provider }), {
       status: response.status,
       statusText: response.statusText,
       headers,

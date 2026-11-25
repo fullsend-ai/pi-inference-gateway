@@ -111,10 +111,11 @@ show any difference in quality.
 ## Native Gemini route
 
 `"api": "google-generative-ai"` sends a model to pi's native Gemini transport instead of an
-OpenAI- or Anthropic-format endpoint. Use it for Gemini tool use on a gateway that also serves
-Gemini's own API: pi's Chat Completions transport drops Gemini's `thought_signature`, so the second
-tool-calling turn fails there (see [Known limitations](troubleshooting.md#known-limitations)). The
-native transport stores the signature and sends it back.
+OpenAI- or Anthropic-format endpoint. pi's native transport stores Gemini's `thought_signature`
+and sends it back itself. On Chat Completions, the extension carries the signature from v0.3.0
+when the gateway returns it as `extra_content` (see
+[Known limitations](troubleshooting.md#known-limitations)), so this route is an alternative, not a
+requirement, for Gemini tool use on a gateway that also serves Gemini's own API.
 
 ```json
 "models": { "gemini-4-neon": { "api": "google-generative-ai" } }

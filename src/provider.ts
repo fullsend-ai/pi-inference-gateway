@@ -188,11 +188,18 @@ export function withGatewayFetch(
   scheme: string,
   credentials: CredentialSource,
   strip: Iterable<string> = SDK_CREDENTIAL_HEADERS,
-  { sessionAffinity = false, toolCallExtra = false }: { sessionAffinity?: boolean; toolCallExtra?: boolean } = {},
+  {
+    sessionAffinity = false,
+    toolCallExtraFor,
+  }: {
+    sessionAffinity?: boolean;
+    /** Carry tool-call `extra_content` (see tool-call-extra.ts), scoped to this pi provider id. */
+    toolCallExtraFor?: string;
+  } = {},
 ): ProviderStreams {
   const fetchFor = (fetch: FetchFunction | undefined) => {
     const gateway = createGatewayFetch({ scheme, credentials, strip, ...(fetch ? { baseFetch: fetch } : {}) });
-    return toolCallExtra ? withToolCallExtra(gateway) : gateway;
+    return toolCallExtraFor === undefined ? gateway : withToolCallExtra(gateway, toolCallExtraFor);
   };
   const wrapped: ProviderStreams = {
     ...base,
@@ -238,7 +245,7 @@ export function gatewayStreams(config: GatewayConfig, deps: RuntimeDeps = {}): R
   const transport = (api: GatewayApi, base: ProviderStreams) =>
     withGatewayFetch(base, authHeaderFor(config, api), credentials, strip, {
       sessionAffinity: config.sessionAffinity === true,
-      toolCallExtra: api === "openai-completions",
+      ...(api === "openai-completions" ? { toolCallExtraFor: config.id } : {}),
     });
   return {
     "anthropic-messages": transport("anthropic-messages", anthropicMessagesApi()),
