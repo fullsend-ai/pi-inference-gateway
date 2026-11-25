@@ -22,6 +22,14 @@ Portkey, NewAPI, Cloudflare/Vercel AI Gateway, an in-house proxy …) that:
 Non-goals (v0.1): OAuth/`/login` flows, image/embedding models, Ollama native API, Gemini API,
 quota/cost dashboards, model routing/fallback across gateways.
 
+Since v0.2 (issue #48), a model can opt into pi's native Gemini transport (`google-generative-ai`,
+`googleGenerativeAIApi` from `/compat`) with `models[id].api`, for a gateway's native Gemini route
+(`{root}/v1/models/{id}:streamGenerateContent`). It is the one transport that keeps Gemini's
+`thoughtSignature` across tool-calling turns. Only config selects it: no gateway hint, catalog
+match or `defaultApi`. It needs pi-ai 1.6.0: earlier releases throw on any `options.fetch` there,
+so every request through the wrapper fails before it is sent. Discovery of the Gemini API's own
+model list stays a non-goal.
+
 ## Name
 
 `pi-inference-gateway` — neutral (no product name), says what it talks to, free on npm, and the
@@ -339,7 +347,8 @@ keyed on a vendor, model id, owner or backend:
 | text/plain error bodies in discovery errors (D5) | `plainTextDetail` | error display | kept | General: any gateway; credentials redacted. |
 | Native auth header per transport | `NATIVE_AUTH_HEADERS` | protocol | kept | Describes each protocol; every target is overridable. |
 | Basic username default `gateway` | `DEFAULT_BASIC_USERNAME` | default | kept | A default value only (Praxis's documented one); overridable. |
-| Gemini `thought_signature` replay (E6) | — | dependency bug | `docs/troubleshooting.md` limitation + upstream issue | Belongs in pi's chat-completions transport; only a generic "replay unknown provider fields for any model" hook would be acceptable here. |
+| Gemini `thought_signature` replay (E6) | — | dependency bug | `docs/troubleshooting.md` limitation + upstream issue; config workaround `models[id].api: "google-generative-ai"` (#48) | The chat-completions fix belongs in pi; only a generic "replay unknown provider fields for any model" hook would be acceptable here. The workaround is routing by config to pi's own native transport, with no Gemini branch in code. |
+| `google-generative-ai` never chosen by discovery: wire `api` hints and `defaultApi` limited to `DISCOVERABLE_APIS`; a snapshot's saved native API not kept | `parseModelEntry`, `parseProviderEntry`/`envProvider`, `entryFromModel` | routing | kept (#48) | Keyed on the API, not a vendor: not every gateway serves a native Gemini route, nor every key on one that does (a `403 model_not_allowed` was seen live), so only the user's per-model config may select it. |
 | vLLM `thinking.budget_tokens` (E3), Vertex structured-output org policy (E2) | — | dependency bug | `docs/troubleshooting.md` only | `compat.forceAdaptiveThinking` / `compat.supportsStrictTools` per model. |
 
 ## pi integration

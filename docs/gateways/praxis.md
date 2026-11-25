@@ -91,7 +91,20 @@ in the per-API mode (`node scripts/mock-gateway.mjs 47811`, `INFERENCE_GATEWAY_A
 
 ## Known limits with Praxis
 
-- Gemini tool calls on `/v1/chat/completions` may fail after the first turn: pi does not replay
+- Gemini tool calls on `/v1/chat/completions` fail after the first turn: pi does not replay
   Gemini's `thought_signature` (see [Known limitations](../troubleshooting.md#known-limitations)).
+  Praxis also serves Gemini's native API (`/v1/models/<model>:generateContent` and
+  `:streamGenerateContent`), and pi's native Gemini transport replays the signature there. On pi
+  1.6.0 or later, route each Gemini model to it:
+
+  ```json
+  "models": { "gemini-4-neon": { "api": "google-generative-ai" } }
+  ```
+
+  It authenticates with Bearer, which Praxis accepts on that route (`x-goog-api-key` alone gets
+  `401 missing API key`); with the Basic setup, add `"authHeader": "basic"` as for the other paths.
+  The deployment must allow the native route for your key. Otherwise it answers
+  `403 model_not_allowed` there even when the same model works on chat completions. See
+  [Native Gemini route](../routing.md#native-gemini-route).
 - Models inherit pi's catalog `compat` flags; if Praxis or its backend rejects a request field, turn
   the flag off per model ([Request features (`compat`)](../compat.md#request-features-compat)).

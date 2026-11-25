@@ -25,10 +25,11 @@ defaults for that transport. Recipes for errors seen through gateways are in
 [Troubleshooting](troubleshooting.md).
 Values must be booleans, strings or numbers. Flags pi declares for the model's API are checked
 against pi's own types (booleans, numbers, and enums such as `maxTokensField` or `thinkingFormat`);
-a wrong-typed value is dropped with a warning. Flag names pi does not declare pass through
-unchanged. `allowedFallbackModels` is never inherited and cannot be set: it is a list of pi-catalog
-model ids that pi sends as a `fallbacks` body field, while the gateway has its own ids and does its
-own routing.
+a wrong-typed value is dropped with a warning. On the three transports that accept compat, flag
+names pi does not declare pass through unchanged. `google-generative-ai` takes no compat flags: any
+given are dropped with a warning. `allowedFallbackModels` is never inherited and cannot be set: it
+is a list of pi-catalog model ids that pi sends as a `fallbacks` body field, while the gateway has
+its own ids and does its own routing.
 
 ## Thinking levels (`thinkingLevelMap`)
 

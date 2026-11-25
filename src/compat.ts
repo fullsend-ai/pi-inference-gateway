@@ -110,13 +110,16 @@ const COMPLETIONS_FIELDS: Readonly<Record<string, Check>> = {
   vllmPriority: finite,
 } satisfies { [K in keyof OpenAICompletionsCompat]?: Check };
 
-const FIELDS: Readonly<Record<GatewayApi, Readonly<Record<string, Check>>>> = {
+/** The transports pi declares a `compat` type for; `google-generative-ai` takes none (`never`). */
+type CompatApi = Exclude<GatewayApi, "google-generative-ai">;
+
+const FIELDS: Readonly<Record<CompatApi, Readonly<Record<string, Check>>>> = {
   "anthropic-messages": ANTHROPIC_FIELDS,
   "openai-responses": RESPONSES_FIELDS,
   "openai-completions": COMPLETIONS_FIELDS,
 };
 
-const ALL_APIS: readonly GatewayApi[] = ["anthropic-messages", "openai-responses", "openai-completions"];
+const ALL_APIS: readonly CompatApi[] = ["anthropic-messages", "openai-responses", "openai-completions"];
 
 export interface CompatValidation {
   kept: CompatOverride;
@@ -129,11 +132,17 @@ export interface CompatValidation {
  * one (the transport is decided later), a known key is kept when any transport that declares it
  * accepts the value — buildModel re-checks against the final transport. `allowedFallbackModels` is
  * always refused: it is a list of model ids, not a flag, and the gateway does its own routing (see
- * anthropicCompat in discovery.ts).
+ * anthropicCompat in discovery.ts). On `google-generative-ai`, which has no compat in pi's types,
+ * every key is dropped.
  */
 export function validateCompat(override: CompatOverride, api?: GatewayApi): CompatValidation {
   const kept: Array<[string, Flag]> = [];
   const problems: string[] = [];
+  if (api === "google-generative-ai") {
+    const keys = Object.keys(override);
+    if (keys.length > 0) problems.push(`compat (${keys.join(", ")}) has no effect on google-generative-ai, which takes no compat flags; ignored`);
+    return { kept: {}, problems };
+  }
   for (const [key, value] of Object.entries(override)) {
     if (key === "allowedFallbackModels") {
       problems.push(`compat.allowedFallbackModels is not supported (a list of model ids sent as a \`fallbacks\` request field; the gateway routes models itself); ignored`);

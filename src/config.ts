@@ -9,27 +9,42 @@ import { fileURLToPath } from "node:url";
 import type { ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { validateCompat } from "./compat.ts";
 
-/** The three pi transports a gateway model can be routed to. */
-export type GatewayApi = "anthropic-messages" | "openai-responses" | "openai-completions";
+/**
+ * The transports discovery may pick on its own: the OpenAI and Anthropic protocols every gateway
+ * this extension targets speaks. A gateway's `api` hint and `defaultApi` are limited to these.
+ */
+export type DiscoverableApi = "anthropic-messages" | "openai-responses" | "openai-completions";
 
-export const GATEWAY_APIS: readonly GatewayApi[] = [
+/**
+ * The pi transports a gateway model can be routed to: the discoverable three, plus pi's native
+ * Gemini transport (`google-generative-ai`), which only a per-model `api` in the config selects.
+ */
+export type GatewayApi = DiscoverableApi | "google-generative-ai";
+
+export const DISCOVERABLE_APIS: readonly DiscoverableApi[] = [
   "anthropic-messages",
   "openai-responses",
   "openai-completions",
 ];
 
+export const GATEWAY_APIS: readonly GatewayApi[] = [...DISCOVERABLE_APIS, "google-generative-ai"];
+
 export function isGatewayApi(value: unknown): value is GatewayApi {
   return typeof value === "string" && (GATEWAY_APIS as readonly string[]).includes(value);
 }
 
+export function isDiscoverableApi(value: unknown): value is DiscoverableApi {
+  return typeof value === "string" && (DISCOVERABLE_APIS as readonly string[]).includes(value);
+}
+
 export const DEFAULT_PROVIDER_ID = "gateway";
-export const DEFAULT_API: GatewayApi = "openai-responses";
+export const DEFAULT_API: DiscoverableApi = "openai-responses";
 export const DEFAULT_MODELS_PATH = "/v1/models";
 export const CONFIG_FILE_NAME = "inference-gateway.json";
 /** Machine-local overlay next to CONFIG_FILE_NAME, merged over it per provider and per model. */
 export const LOCAL_CONFIG_FILE_NAME = "inference-gateway.local.json";
 
-/** Where a token is sent: one of the three transports, or the model-list request. */
+/** Where a token is sent: one of the transports, or the model-list request. */
 export type AuthTarget = GatewayApi | "discovery";
 
 export const AUTH_TARGETS: readonly AuthTarget[] = [...GATEWAY_APIS, "discovery"];
@@ -44,11 +59,16 @@ function isAuthTarget(value: string): value is AuthTarget {
  * `authorization: Bearer`, and discovery uses Bearer. A path-routing front proxy that forwards
  * `/v1/messages` to a Claude backend accepts only `x-api-key` there, so a blanket Bearer default
  * would 401 every Claude model.
+ *
+ * pi's Gemini transport sends `x-goog-api-key`, but a gateway's native Gemini route is still the
+ * gateway's own endpoint and authenticates like the rest of it: Bearer by default here (a Praxis
+ * deployment answered 401 to `x-goog-api-key` alone and 200 to Bearer on that route).
  */
 export const NATIVE_AUTH_HEADERS: Readonly<Record<AuthTarget, string>> = {
   "anthropic-messages": "x-api-key",
   "openai-responses": "authorization",
   "openai-completions": "authorization",
+  "google-generative-ai": "authorization",
   discovery: "authorization",
 };
 
@@ -201,7 +221,7 @@ export interface GatewayConfig {
    * `authorization` means `Bearer <token>`; any other header carries the raw token.
    */
   authHeaders: Partial<Record<AuthTarget, string>>;
-  defaultApi: GatewayApi;
+  defaultApi: DiscoverableApi;
   /** Extra static request headers, sent on discovery and on every model request. */
   headers: Record<string, string>;
   /** Path of the model list, relative to `baseUrl`. */
@@ -406,12 +426,18 @@ function parseModelOverride(raw: unknown, where: string, warnings: string[]): Mo
 }
 
 /**
- * Header names that carry a credential for this provider: `authorization`, `x-api-key`, and every
+ * The auth headers pi's own SDKs set from `apiKey`: Bearer (OpenAI), `x-api-key` (Anthropic) and
+ * `x-goog-api-key` (Gemini).
+ */
+export const SDK_CREDENTIAL_HEADERS: readonly string[] = ["authorization", "x-api-key", "x-goog-api-key"];
+
+/**
+ * Header names that carry a credential for this provider: the SDK headers above, and every
  * header named as an auth scheme in `authHeaders`. They are stripped from every outgoing request
  * before the selected scheme's header is set, and refused as static `headers`.
  */
 export function credentialHeaderNames(authHeaders: Partial<Record<AuthTarget, string>>): Set<string> {
-  const names = new Set(["authorization", "x-api-key"]);
+  const names = new Set(SDK_CREDENTIAL_HEADERS);
   for (const scheme of Object.values(authHeaders)) {
     if (scheme !== undefined && scheme !== "basic") names.add(scheme);
   }
@@ -456,7 +482,8 @@ function authScheme(value: unknown): string | undefined {
 
 /**
  * `authHeader` in the file: one header name for every target, or an object keyed by target
- * (`anthropic-messages`, `openai-responses`, `openai-completions`, `discovery`).
+ * (`anthropic-messages`, `openai-responses`, `openai-completions`, `google-generative-ai`,
+ * `discovery`).
  */
 export function parseAuthHeaders(raw: unknown, where: string, warnings: string[]): Partial<Record<AuthTarget, string>> {
   const overrides: Partial<Record<AuthTarget, string>> = {};
@@ -626,8 +653,8 @@ export function parseProviderEntry(
     }
   }
   if (raw.defaultApi !== undefined) {
-    if (isGatewayApi(raw.defaultApi)) config.defaultApi = raw.defaultApi;
-    else warnings.push(`${where}: "defaultApi" must be one of ${GATEWAY_APIS.join(", ")}; using ${DEFAULT_API}`);
+    if (isDiscoverableApi(raw.defaultApi)) config.defaultApi = raw.defaultApi;
+    else warnings.push(`${where}: "defaultApi" must be one of ${DISCOVERABLE_APIS.join(", ")}; using ${DEFAULT_API}`);
   }
   if (raw.modelsPath !== undefined) {
     if (typeof raw.modelsPath === "string" && /^\/[^\s?#]*$/.test(raw.modelsPath)) config.modelsPath = raw.modelsPath;
@@ -783,11 +810,11 @@ export function envProvider(env: Record<string, string | undefined>, home: strin
   let defaultApiSet = false;
   const rawApi = env[ENV.defaultApi]?.trim();
   if (rawApi) {
-    if (isGatewayApi(rawApi)) {
+    if (isDiscoverableApi(rawApi)) {
       defaultApi = rawApi;
       defaultApiSet = true;
     }
-    else warnings.push(`${ENV.defaultApi}: must be one of ${GATEWAY_APIS.join(", ")}; using ${DEFAULT_API}`);
+    else warnings.push(`${ENV.defaultApi}: must be one of ${DISCOVERABLE_APIS.join(", ")}; using ${DEFAULT_API}`);
   }
 
   const rawAuthHeader = env[ENV.authHeader]?.trim();

@@ -77,13 +77,20 @@ it, and its own `refreshModels` replaces it on a successful fetch (persisting th
 always through `rebindModels()`, which keeps id and metadata but takes base URL, headers, overrides
 and filters from the *current* config.
 
-### One provider, three transports
+### One provider, four transports (one opt-in)
 
 `createProvider`'s `api` may be a map keyed by `model.api`. Each entry is pi's own lazy transport
 from `@earendil-works/pi-ai/compat` (`anthropicMessagesApi`, `openAIResponsesApi`,
 `openAICompletionsApi` — note the casing). Base URLs come from one root: the OpenAI transports get
 `{root}/v1` (they append `/responses` or `/chat/completions`), the Anthropic SDK gets `{root}` (it
 appends `/v1/messages`).
+
+A fourth entry, `googleGenerativeAIApi` (`google-generative-ai`), is opt-in per model through
+`models[id].api` only. Discovery never selects it: wire `api` hints and `defaultApi` are limited to
+`DISCOVERABLE_APIS`. It gets `{root}/v1` and appends `/models/{id}:streamGenerateContent`. pi-ai
+before 1.6.0 throws on any `options.fetch` there, so `provider.test.ts` asserts success on 1.6.0 and
+a fail-closed error (nothing sent) on the older matrix entries. See
+[Native Gemini route](docs/routing.md#native-gemini-route).
 
 ### Auth and the request fetch
 

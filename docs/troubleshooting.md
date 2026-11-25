@@ -97,11 +97,21 @@ For agentgateway-specific errors, see
 - **Gemini tool calls over `/v1/chat/completions` fail after the first turn** on a gateway that
   passes Gemini's OpenAI-compatible responses through. Gemini attaches a `thought_signature` to each
   tool call (`message.extra_content.google.thought_signature`) and requires it back on the next
-  request. pi's chat-completions transport (pi-ai 0.99.2 through 1.1.0) neither reads nor replays
+  request. pi's chat-completions transport (pi-ai 0.99.2 through 1.6.0) neither reads nor replays
   that field, so turn 2 is rejected with `400 Function call is missing a thought_signature in
-  functionCall parts` (confirmed live on a path-routed gateway, pi 0.99.2 and 1.1.0). Single-turn
-  prompts and text replies work. The fix belongs in pi's transport; gateways that carry the
-  signature in the tool-call id, such as [agentgateway](gateways/agentgateway.md), are expected to be
-  unaffected.
+  functionCall parts` (confirmed live on a path-routed gateway, pi 0.99.2, 1.1.0 and 1.6.0).
+  Single-turn prompts and text replies work. Gateways that carry the signature in the tool-call id,
+  such as [agentgateway](gateways/agentgateway.md), are expected to be unaffected.
+  **Workaround (pi 1.6.0 or later):** if the gateway serves Gemini's native API
+  (`POST {base}/v1/models/<model>:streamGenerateContent`), route the model there with
+  `"models": { "<model>": { "api": "google-generative-ai" } }` (or
+  `INFERENCE_GATEWAY_EXTRA_MODELS=<model>=google-generative-ai`). pi's native Gemini transport
+  stores and replays the signature. The gateway must allow that route for your key: a `403`
+  (for example `model_not_allowed`) there means it does not, even when the same model works on
+  chat completions. Older pi refuses the extension's request wrapper on that transport, so the
+  model fails with `Custom fetch is not supported by the Google Generative AI adapter` and nothing
+  is sent. A `404` on `/v1/publishers/google/models/<model>:streamGenerateContent` means
+  `GOOGLE_GENAI_USE_VERTEXAI` or `GOOGLE_GENAI_USE_ENTERPRISE` is set in pi's environment: unset
+  both. See [Native Gemini route](routing.md#native-gemini-route).
 - **Inherited `compat` flags may not suit your gateway** — see
   [Request features (`compat`)](compat.md#request-features-compat).

@@ -15,7 +15,7 @@ every variable, the config file, auth and model-list behaviour. Back to the [REA
 | `INFERENCE_GATEWAY_AUTH_HEADER` | Override the auth header — see [Auth headers](#auth). | native per API |
 | `INFERENCE_GATEWAY_BASIC_USER` | Basic-auth username — see [Auth](#auth). | `gateway` |
 | `INFERENCE_GATEWAY_BASIC_PASSWORD` / `_PASSWORD_FILE` | Basic-auth password, or a file holding it (re-read per request). | — |
-| `INFERENCE_GATEWAY_EXTRA_MODELS` | Models the gateway serves but does not list: `id=api,id=api`. | — |
+| `INFERENCE_GATEWAY_EXTRA_MODELS` | Models the gateway serves but does not list: `id=api,id=api`. `api` may also be `google-generative-ai` (see [Native Gemini route](routing.md#native-gemini-route)). | — |
 | `INFERENCE_GATEWAY_DISCOVERY` | Model-list formats to request, comma-separated: `openai`, `anthropic` (see [Discovery: both list formats](#discovery-both-list-formats)). | `openai,anthropic` |
 | `INFERENCE_GATEWAY_DISCOVERY_TIMEOUT_MS` | How long pi's startup waits for the model list; `0` skips it (see [When the model list changes](#when-the-model-list-changes)). | `5000` |
 | `INFERENCE_GATEWAY_SESSION_AFFINITY` | `1` sends a hashed session id for gateway affinity and caching (see [Session affinity](#session-affinity)). | off |
@@ -56,7 +56,7 @@ For several gateways, per-model overrides or models the gateway does not list, a
 | `username` / `usernameEnv`, `passwordEnv` / `passwordFile` | Basic-auth credentials (a literal `password` is refused). |
 | `authHeader` | See [Auth headers](#auth). |
 | `defaultApi` | As `INFERENCE_GATEWAY_DEFAULT_API`; see [Which API to pick](routing.md#which-api-to-pick). |
-| `headers` | Extra headers on every request, discovery included. A header named like an auth header (`authorization`, `x-api-key`, or any header used in `authHeader`) is refused: credentials only come from the configured key, token or password. |
+| `headers` | Extra headers on every request, discovery included. A header named like an auth header (`authorization`, `x-api-key`, `x-goog-api-key`, or any header used in `authHeader`) is refused: credentials only come from the configured key, token or password. |
 | `modelsPath` | Model-list path, default `/v1/models`. |
 | `discovery` | Model-list formats to request: `["openai", "anthropic"]` (the default), `["openai"]` or `["anthropic"]`. See [Discovery: both list formats](#discovery-both-list-formats). |
 | `include` / `exclude` | `*` globs over listed model ids. |
@@ -197,6 +197,7 @@ By default each transport uses its protocol's native scheme:
 | `anthropic-messages` | `POST /v1/messages` | `x-api-key` |
 | `openai-responses` | `POST /v1/responses` | `bearer` |
 | `openai-completions` | `POST /v1/chat/completions` | `bearer` |
+| `google-generative-ai` | `POST /v1/models/<model>:streamGenerateContent` (opt-in, see [Native Gemini route](routing.md#native-gemini-route)) | `bearer` |
 | `discovery` | `GET /v1/models` (OpenAI-format list) | `bearer` |
 
 The Anthropic-format model list (`GET /v1/models` with `anthropic-version`) uses the

@@ -22,6 +22,7 @@ import {
   modelsFromList,
   parseModelEntry,
   parseModelList,
+  rebindModels,
   selectApi,
   separatorVariants,
   stripVendorPrefix,
@@ -535,6 +536,63 @@ describe("baseUrlFor", () => {
     assert.equal(baseUrlFor("anthropic-messages", "https://gw.example.com/p"), "https://gw.example.com/p");
     assert.equal(baseUrlFor("openai-responses", "https://gw.example.com/p"), "https://gw.example.com/p/v1");
     assert.equal(baseUrlFor("openai-completions", "https://gw.example.com"), "https://gw.example.com/v1");
+  });
+
+  it("gives pi's Gemini transport /v1: it appends /models/{id}:streamGenerateContent to a set base", () => {
+    assert.equal(baseUrlFor("google-generative-ai", "https://gw.example.com/p"), "https://gw.example.com/p/v1");
+  });
+});
+
+describe("google-generative-ai: only a config models[id].api selects it", () => {
+  /** A Gemini id that pi's catalog resolves to its google-generative-ai entry, with a thinking map. */
+  const GEMINI = getBuiltinModels("google").find(
+    (model) => model.thinkingLevelMap !== undefined && findCatalogModel(model.id)?.model.api === "google-generative-ai",
+  );
+
+  it("ignores a gateway's api hint for it, and catalog Gemini ids still go to chat completions", () => {
+    assert.ok(GEMINI);
+    const entry = parseModelEntry({ id: GEMINI.id, owned_by: "google", api: "google-generative-ai" });
+    assert.ok(entry);
+    assert.equal(entry.api, undefined, "the wire cannot select a native API");
+    assert.equal(selectApi(entry, config()), "openai-completions");
+  });
+
+  it("routes a listed model to it from models[id].api, with /v1 and the same-transport catalog metadata", () => {
+    assert.ok(GEMINI);
+    const cfg = config({ headers: { "x-team": "docs" }, models: { [GEMINI.id]: { api: "google-generative-ai" } } });
+    const { models } = modelsFromList({ data: [{ id: GEMINI.id, owned_by: "vertex" }] }, cfg);
+    assert.equal(models.length, 1);
+    const [model] = models;
+    assert.equal(model.api, "google-generative-ai");
+    assert.equal(model.id, GEMINI.id, "id verbatim");
+    assert.equal(model.baseUrl, "https://gw.example.com/v1");
+    assert.equal(model.contextWindow, GEMINI.contextWindow);
+    assert.deepEqual(model.thinkingLevelMap, GEMINI.thinkingLevelMap);
+    assert.deepEqual(model.headers, { "x-team": "docs" });
+    assert.equal("compat" in model, false, "pi declares no compat for this transport");
+  });
+
+  it("adds an unlisted model from models[id].api", () => {
+    const { models } = modelsFromList([], config({ models: { "acme/gemini-x": { api: "google-generative-ai" } } }));
+    assert.deepEqual(
+      models.map((model) => [model.id, model.api, model.baseUrl]),
+      [["acme/gemini-x", "google-generative-ai", "https://gw.example.com/v1"]],
+    );
+  });
+
+  it("a restored snapshot keeps it only while the config still asks for it", () => {
+    const cfg = config({ models: { "gemini-x": { api: "google-generative-ai" } } });
+    const [saved] = modelsFromList([], cfg).models;
+    assert.equal(saved.api, "google-generative-ai");
+    for (const keepApi of [true, false]) {
+      assert.equal(rebindModels([saved], cfg, { keepApi })[0]?.api, "google-generative-ai", `keepApi: ${keepApi}`);
+      const without = rebindModels([saved], config(), { keepApi });
+      assert.deepEqual(
+        without.map((model) => [model.id, model.api]),
+        [["gemini-x", "openai-responses"]],
+        `keepApi: ${keepApi}: the saved native API does not outlive its config`,
+      );
+    }
   });
 });
 

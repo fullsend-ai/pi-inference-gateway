@@ -5,7 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { createProvider } from "@earendil-works/pi-ai";
-import { anthropicMessagesApi, openAICompletionsApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
+import { anthropicMessagesApi, googleGenerativeAIApi, openAICompletionsApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
 import type {
   Api,
   ApiKeyAuth,
@@ -25,6 +25,7 @@ import {
   ENV,
   loadConfig,
   resolveCredentials,
+  SDK_CREDENTIAL_HEADERS,
   type CredentialKind,
   type GatewayApi,
   type GatewayConfig,
@@ -94,7 +95,7 @@ export type CredentialSource = (scheme: string) => Promise<GatewayCredentials>;
 export function createGatewayFetch({
   scheme,
   credentials,
-  strip = ["authorization", "x-api-key"],
+  strip = SDK_CREDENTIAL_HEADERS,
   baseFetch,
 }: {
   scheme: string;
@@ -185,7 +186,7 @@ export function withGatewayFetch(
   base: ProviderStreams,
   scheme: string,
   credentials: CredentialSource,
-  strip: Iterable<string> = ["authorization", "x-api-key"],
+  strip: Iterable<string> = SDK_CREDENTIAL_HEADERS,
   { sessionAffinity = false }: { sessionAffinity?: boolean } = {},
 ): ProviderStreams {
   const fetchFor = (fetch: FetchFunction | undefined) =>
@@ -217,7 +218,13 @@ export function credentialSource(config: GatewayConfig, deps: RuntimeDeps = {}):
 /**
  * The `api` map: pi dispatches each model to the entry keyed by its `model.api`. Every transport is
  * wrapped: redirects are refused, and the auth header follows that transport's scheme — native
- * (`x-api-key` for Messages, Bearer for the OpenAI ones) unless the config overrides it.
+ * (`x-api-key` for Messages, Bearer for the OpenAI ones and the gateway's Gemini route) unless the
+ * config overrides it.
+ *
+ * `google-generative-ai` is pi's native Gemini transport, which stores and replays Gemini's
+ * `thoughtSignature` on tool calls (pi's Chat Completions transport drops it). Only a per-model
+ * `api` in the config routes a model to it. pi before 1.6.0 refuses any `options.fetch` on it
+ * ("Custom fetch is not supported"), so there such a model fails before anything is sent.
  */
 export function gatewayStreams(config: GatewayConfig, deps: RuntimeDeps = {}): Record<GatewayApi, ProviderStreams> {
   const credentials = credentialSource(config, deps);
@@ -228,6 +235,7 @@ export function gatewayStreams(config: GatewayConfig, deps: RuntimeDeps = {}): R
     "anthropic-messages": transport("anthropic-messages", anthropicMessagesApi()),
     "openai-responses": transport("openai-responses", openAIResponsesApi()),
     "openai-completions": transport("openai-completions", openAICompletionsApi()),
+    "google-generative-ai": transport("google-generative-ai", googleGenerativeAIApi()),
   };
 }
 

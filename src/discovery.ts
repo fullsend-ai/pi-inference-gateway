@@ -17,7 +17,7 @@ import type {
   OpenAIResponsesCompat,
   ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
-import { authHeaderEntry, authHeaderFor, credentialHeaderNames, DISCOVERY_DIALECT_TARGETS, discoveryDialects, ENV, type AuthTarget, type CompatOverride, type DiscoveryDialect, type GatewayCredentials, type ModelOverride, hasControlChars, isValidModelId, modelOverride, type CostFields, type GatewayApi, type GatewayConfig, isGatewayApi } from "./config.ts";
+import { authHeaderEntry, authHeaderFor, credentialHeaderNames, DISCOVERY_DIALECT_TARGETS, discoveryDialects, ENV, type AuthTarget, type CompatOverride, type DiscoveryDialect, type GatewayCredentials, type ModelOverride, hasControlChars, isValidModelId, modelOverride, type CostFields, type DiscoverableApi, type GatewayApi, type GatewayConfig, isDiscoverableApi } from "./config.ts";
 
 export const LIMITS = {
   maxIdLength: 256,
@@ -37,18 +37,19 @@ export const DEFAULTS = {
   maxTokens: 16_384,
 } as const;
 
-/** A pi chat model on one of the three gateway transports. */
+/** A pi chat model on one of the gateway transports. */
 export type GatewayModel =
   | Model<"anthropic-messages">
   | Model<"openai-responses">
-  | Model<"openai-completions">;
+  | Model<"openai-completions">
+  | Model<"google-generative-ai">;
 
 /** One model as the gateway described it, sanitised. Every field but `id` is optional. */
 export interface GatewayModelEntry {
   id: string;
   name?: string;
-  /** Explicit transport hint (`api` field). */
-  api?: GatewayApi;
+  /** Explicit transport hint (`api` field). Never `google-generative-ai`: only config selects that. */
+  api?: DiscoverableApi;
   /** Endpoint paths the gateway says this model serves. */
   endpoints: string[];
   /** Lower-cased owner/provider hints: owned_by, provider, litellm_provider. */
@@ -363,7 +364,7 @@ export function parseModelEntry(raw: unknown): GatewayModelEntry | undefined {
   const name = cleanString(firstDefined(info.display_name, info.displayName), LIMITS.maxNameLength);
   if (name !== undefined) entry.name = name;
 
-  if (isGatewayApi(info.api)) entry.api = info.api;
+  if (isDiscoverableApi(info.api)) entry.api = info.api;
   for (const key of ["endpoint", "inference_endpoint"]) {
     const value = cleanString(info[key], 256);
     if (value !== undefined) entry.endpoints.push(value);
@@ -782,14 +783,15 @@ function isClaudeId(id: string): boolean {
 
 /**
  * Pick the transport for one model. First match wins:
- *   1. config `models[id].api`
- *   2. gateway hint: `api`, then `endpoint`/`inference_endpoint`/`supported_endpoints`/`endpoints`
+ *   1. config `models[id].api` — the only rule that can pick `google-generative-ai`
+ *   2. gateway hint: `api` (one of the three OpenAI/Anthropic APIs), then
+ *      `endpoint`/`inference_endpoint`/`supported_endpoints`/`endpoints`
  *      (messages for Anthropic owners, else responses, else chat)
  *   3. pi's built-in catalog under `anthropic` → messages, under `openai` → responses
  *   4. a `claude-` id (also after a `vendor/` prefix) → messages
  *   5. owner: anthropic → messages; openai/azure → responses; AMBIGUOUS_OWNERS say nothing
  *   6. pi's built-in catalog under any other provider → chat completions (never a native API such
- *      as google-generative-ai: a gateway speaks the three OpenAI/Anthropic protocols only)
+ *      as google-generative-ai: not every gateway serves one, nor every key on one that does)
  *   7. the provider's `defaultApi`
  *
  * The model's own identity (3, 4) beats the owner (5): agentgateway synthesises its list with
@@ -834,7 +836,8 @@ export function identifiedApi(
 /**
  * Base URL per transport, from the one gateway root: pi's OpenAI transports append
  * `/responses` or `/chat/completions` to a base that already ends in `/v1`; the Anthropic SDK
- * appends `/v1/messages` itself, so it gets the bare root.
+ * appends `/v1/messages` itself, so it gets the bare root. pi's Gemini transport uses a set base
+ * URL as the versioned root and appends `/models/{id}:streamGenerateContent`, so it gets `/v1`.
  */
 export function baseUrlFor(api: GatewayApi, root: string): string {
   return api === "anthropic-messages" ? root : `${root}/v1`;
@@ -922,6 +925,11 @@ function withApi(
       const base = sessionAffinity ? { ...same?.compat, ...affinity } : same?.compat;
       const compat = compatFor<OpenAICompletionsCompat>({}, base, override.compat, api);
       return { ...core, api, ...thinking(same?.thinkingLevelMap), ...(compat ? { compat } : {}) };
+    }
+    case "google-generative-ai": {
+      // pi declares no compat for this transport (and no affinity headers), so none is set.
+      const same = catalog && hasApi(catalog, "google-generative-ai") ? catalog : undefined;
+      return { ...core, api, ...thinking(same?.thinkingLevelMap) };
     }
   }
 }
@@ -1215,7 +1223,8 @@ function storedHints(model: object): RoutingHints {
  * A cached pi model as if the gateway had described it: its metadata and persisted routing hints
  * become hints. Its saved transport is kept when `keepApi` (the snapshot was saved by the current
  * selection rules), and also when re-deriving finds nothing that identifies the model — a model
- * that only the old `defaultApi` (or a since-removed hint) placed must not move.
+ * that only the old `defaultApi` (or a since-removed hint) placed must not move. A saved
+ * `google-generative-ai` is never kept: only the current config's `models[id].api` selects it.
  */
 function entryFromModel(model: Model<GatewayApi>, keepApi: boolean, config: Pick<GatewayConfig, "models">): GatewayModelEntry {
   const entry: GatewayModelEntry = {
@@ -1228,7 +1237,7 @@ function entryFromModel(model: Model<GatewayApi>, keepApi: boolean, config: Pick
     vision: model.input.includes("image"),
     cost: { input: model.cost.input, output: model.cost.output, cacheRead: model.cost.cacheRead, cacheWrite: model.cost.cacheWrite },
   };
-  if (keepApi || identifiedApi(entry, config) === undefined) entry.api = model.api;
+  if (isDiscoverableApi(model.api) && (keepApi || identifiedApi(entry, config) === undefined)) entry.api = model.api;
   return entry;
 }
 
@@ -1236,6 +1245,7 @@ function asGatewayModel(model: AnyModel): Model<GatewayApi> | undefined {
   if (hasApi(model, "anthropic-messages")) return model;
   if (hasApi(model, "openai-responses")) return model;
   if (hasApi(model, "openai-completions")) return model;
+  if (hasApi(model, "google-generative-ai")) return model;
   return undefined;
 }
 

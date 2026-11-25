@@ -162,6 +162,7 @@ describe("parseConfigFile", () => {
       "anthropic-messages": "x-api-key",
       "openai-responses": "x-api-key",
       "openai-completions": "x-api-key",
+      "google-generative-ai": "x-api-key",
       discovery: "x-api-key",
     });
     assert.equal(provider.defaultApi, "openai-completions");
@@ -499,6 +500,65 @@ describe("extra models", () => {
       HOME,
     );
     assert.deepEqual(providers[0].models, { "gpt-6-luna": { api: "openai-responses" } });
+  });
+});
+
+describe("google-generative-ai: opt-in per model only", () => {
+  it("is accepted as models[id].api and in INFERENCE_GATEWAY_EXTRA_MODELS", () => {
+    const { providers, warnings } = parseConfigFile(
+      { providers: { gw: { baseUrl: "https://gw.example.com", models: { "gemini-4-neon": { api: "google-generative-ai" } } } } },
+      HOME,
+    );
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(providers[0].models["gemini-4-neon"], { api: "google-generative-ai" });
+    const envWarnings: string[] = [];
+    assert.deepEqual(parseExtraModelsEnv("gemini-4-neon=google-generative-ai", envWarnings), {
+      "gemini-4-neon": { api: "google-generative-ai" },
+    });
+    assert.deepEqual(envWarnings, []);
+  });
+
+  it("is refused as defaultApi, in the file and in INFERENCE_GATEWAY_DEFAULT_API", () => {
+    const file = parseConfigFile({ providers: { gw: { baseUrl: "https://gw.example.com", defaultApi: "google-generative-ai" } } }, HOME);
+    assert.equal(file.providers[0].defaultApi, "openai-responses");
+    assert.equal(file.warnings.length, 1);
+    assert.match(file.warnings[0], /"defaultApi" must be one of anthropic-messages, openai-responses, openai-completions;/);
+    const env = envProvider({ INFERENCE_GATEWAY_BASE_URL: "https://gw.example.com", INFERENCE_GATEWAY_DEFAULT_API: "google-generative-ai" }, HOME);
+    assert.equal(env.providers[0].defaultApi, "openai-responses");
+    assert.equal(env.defaultApiSet, false);
+    assert.equal(env.warnings.length, 1);
+  });
+
+  it("authenticates with Bearer by default and takes a per-target authHeader", () => {
+    assert.equal(authHeaderFor({ authHeaders: {} }, "google-generative-ai"), "authorization");
+    const warnings: string[] = [];
+    assert.deepEqual(parseAuthHeaders({ "google-generative-ai": "basic" }, "p", warnings), { "google-generative-ai": "basic" });
+    assert.deepEqual(parseAuthHeaderEnv("google-generative-ai=x-goog-api-key", warnings), { "google-generative-ai": "x-goog-api-key" });
+    assert.deepEqual(warnings, []);
+  });
+
+  it("refuses x-goog-api-key as a static header: it carries a credential", () => {
+    const { providers, warnings } = parseConfigFile(
+      { providers: { gw: { baseUrl: "https://gw.example.com", headers: { "X-Goog-Api-Key": "y", ok: "1" } } } },
+      HOME,
+    );
+    assert.deepEqual(providers[0].headers, { ok: "1" });
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /auth header/);
+  });
+
+  it("drops compat on a google-generative-ai model: pi declares none for it", () => {
+    const { providers, warnings } = parseConfigFile(
+      {
+        providers: {
+          gw: { baseUrl: "https://gw.example.com", models: { "gemini-4-neon": { api: "google-generative-ai", compat: { supportsStore: false } } } },
+        },
+      },
+      HOME,
+    );
+    assert.deepEqual(providers[0].models["gemini-4-neon"].compat, {});
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /compat \(supportsStore\) has no effect on google-generative-ai/);
   });
 });
 
